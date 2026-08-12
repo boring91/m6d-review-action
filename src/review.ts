@@ -177,8 +177,11 @@ function reviewSchema(): Record<string, unknown> {
   };
 }
 
-function reviewPrompt(repository: string): string {
-  return readPrompt("review.md").replace("{{repository}}", repository);
+function reviewPrompt(repository: string, thorough: boolean): string {
+  const prompt = readPrompt("review.md").replace("{{repository}}", repository);
+  return thorough
+    ? `${prompt.trimEnd()}\n\n${readPrompt("review-thorough.md")}`
+    : prompt;
 }
 
 async function listThreads(
@@ -422,7 +425,10 @@ export async function prepare({
   fs.writeFileSync(
     ".codex/review-prompt.md",
     [
-      reviewPrompt(`${owner}/${repo}`),
+      reviewPrompt(
+        `${owner}/${repo}`,
+        process.env.M6D_REVIEW_LEVEL === "thorough",
+      ),
       "",
       "Runtime review target:",
       `- PR title: ${process.env.M6D_PR_TITLE}`,

@@ -137,8 +137,11 @@ function reviewSchema() {
         },
     };
 }
-function reviewPrompt(repository) {
-    return (0, helpers_js_1.readPrompt)("review.md").replace("{{repository}}", repository);
+function reviewPrompt(repository, thorough) {
+    const prompt = (0, helpers_js_1.readPrompt)("review.md").replace("{{repository}}", repository);
+    return thorough
+        ? `${prompt.trimEnd()}\n\n${(0, helpers_js_1.readPrompt)("review-thorough.md")}`
+        : prompt;
 }
 async function listThreads(github, owner, repo, pullNumber) {
     const query = `
@@ -307,7 +310,7 @@ async function prepare({ github, context, }) {
     fs.writeFileSync(".codex/pr-context.md", `${contextLines.join("\n")}\n`, "utf8");
     fs.writeFileSync(".codex/review-schema.json", `${JSON.stringify(reviewSchema(), null, 2)}\n`, "utf8");
     fs.writeFileSync(".codex/review-prompt.md", [
-        reviewPrompt(`${owner}/${repo}`),
+        reviewPrompt(`${owner}/${repo}`, process.env.M6D_REVIEW_LEVEL === "thorough"),
         "",
         "Runtime review target:",
         `- PR title: ${process.env.M6D_PR_TITLE}`,

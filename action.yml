@@ -5,6 +5,10 @@ inputs:
   mode:
     description: "Event handler to run: review, command, or reply."
     required: true
+  review-level:
+    description: "Review depth: standard or thorough."
+    required: false
+    default: standard
   app-id:
     description: GitHub App ID used to submit reviews and dispatch workflows.
     required: true
@@ -28,12 +32,20 @@ runs:
       env:
         M6D_MODE: ${{ inputs.mode }}
         M6D_EVENT_NAME: ${{ github.event_name }}
+        M6D_REVIEW_LEVEL: ${{ inputs.review-level }}
       run: |
         set -euo pipefail
         case "$M6D_MODE:$M6D_EVENT_NAME" in
           review:pull_request|review:workflow_dispatch|command:issue_comment|reply:pull_request_review_comment) ;;
           *)
             echo "::error::Mode $M6D_MODE does not support the $M6D_EVENT_NAME event"
+            exit 1
+            ;;
+        esac
+        case "$M6D_REVIEW_LEVEL" in
+          standard|thorough) ;;
+          *)
+            echo "::error::Unknown review level: $M6D_REVIEW_LEVEL"
             exit 1
             ;;
         esac
@@ -94,6 +106,7 @@ runs:
         M6D_BASE_SHA: ${{ steps.pr.outputs.base_sha }}
         M6D_HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
         M6D_APP_SLUG: ${{ steps.review-app-token.outputs.app-slug }}
+        M6D_REVIEW_LEVEL: ${{ inputs.review-level }}
       with:
         github-token: ${{ steps.review-app-token.outputs.token }}
         script: |
@@ -104,9 +117,19 @@ runs:
       id: codex-review
       if: inputs.mode == 'review'
       shell: bash
+      env:
+        M6D_REVIEW_LEVEL: ${{ inputs.review-level }}
       run: |
         set -euo pipefail
-        codex exec --ephemeral -c 'approval_policy="never"' -c 'sandbox_mode="danger-full-access"' --output-schema .codex/review-schema.json -o .codex/review.json - < .codex/review-prompt.md
+        review_args=()
+        if [[ "$M6D_REVIEW_LEVEL" == "thorough" ]]; then
+          review_args+=(
+            -c 'agents.enabled=true'
+            -c 'agents.max_concurrent_threads_per_session=4'
+            -c 'agents.default_subagent_model="gpt-5.6-sol"'
+          )
+        fi
+        codex exec --ephemeral --model gpt-5.6-sol "${review_args[@]}" -c 'approval_policy="never"' -c 'sandbox_mode="danger-full-access"' --output-schema .codex/review-schema.json -o .codex/review.json - < .codex/review-prompt.md
         test -s .codex/review.json
 
     - name: Submit pull-request review

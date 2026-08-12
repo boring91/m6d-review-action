@@ -11,6 +11,7 @@ import {
   readPrompt,
   truncate,
 } from "./helpers.js";
+import * as command from "./command.js";
 import * as reply from "./reply.js";
 import * as review from "./review.js";
 import type { Context, Core, GitHub, PullRequest } from "./types.js";
@@ -107,7 +108,53 @@ test("helpers parse output and enforce trusted associations", () => {
 test("packaged prompts load independently of the working directory", async () => {
   await inTemporaryDirectory(() => {
     assert.match(readPrompt("review.md"), /\{\{repository\}\}/);
+    assert.match(readPrompt("review-thorough.md"), /spawn exactly four subagents/i);
+    assert.match(readPrompt("review.md"), /do not require test coverage/i);
     assert.match(readPrompt("reply.md"), /\{\{repository\}\}/);
+  });
+});
+
+test("review action pins GPT-5.6 Sol and caps thorough reviews at four agents", () => {
+  const action = fs.readFileSync(path.join(__dirname, "../action.yml"), "utf8");
+  assert.match(action, /--model gpt-5\.6-sol/);
+  assert.match(action, /agents\.enabled=true/);
+  assert.match(action, /agents\.max_concurrent_threads_per_session=4/);
+  assert.match(action, /agents\.default_subagent_model="gpt-5\.6-sol"/);
+});
+
+test("review commands dispatch standard and thorough levels", async () => {
+  const dispatches: AnyRecord[] = [];
+  const context: Context = {
+    repo: { owner: "acme", repo: "project" },
+    payload: {
+      issue: { number: 42, state: "open", pull_request: {} },
+      comment: {
+        id: 8,
+        body: "@review",
+        user: { login: "maintainer", type: "User" },
+        author_association: "MEMBER",
+      },
+      repository: { default_branch: "main" },
+    },
+  };
+  const github = {
+    rest: {
+      actions: {
+        createWorkflowDispatch: async (payload: AnyRecord) =>
+          dispatches.push(payload),
+      },
+      reactions: { createForIssueComment: async () => {} },
+    },
+  } as unknown as GitHub;
+
+  await command.dispatchReview({ github, context, core: createCore() });
+  context.payload.comment!.body = "please @review thorough";
+  await command.dispatchReview({ github, context, core: createCore() });
+
+  assert.deepEqual(dispatches[0].inputs, { pr_number: "42" });
+  assert.deepEqual(dispatches[1].inputs, {
+    pr_number: "42",
+    review_level: "thorough",
   });
 });
 
@@ -198,6 +245,7 @@ test("status updates only the current GitHub App comment", async () => {
         M6D_BASE_SHA: "base-sha",
         M6D_HEAD_SHA: "head-sha",
         M6D_PR_TITLE: "Test pull request",
+        M6D_REVIEW_LEVEL: "standard",
       },
       () => review.prepare({ github, context }),
     );
@@ -207,10 +255,35 @@ test("status updates only the current GitHub App comment", async () => {
     );
     assert.match(prompt, /pull request for acme\/project/);
     assert.doesNotMatch(prompt, /\{\{repository\}\}/);
+    assert.doesNotMatch(prompt, /Thorough Review Workflow/);
+
+    await withEnvironment(
+      {
+        M6D_APP_SLUG: "m6d-review",
+        M6D_BASE_REF: "main",
+        M6D_BASE_SHA: "base-sha",
+        M6D_HEAD_SHA: "head-sha",
+        M6D_PR_TITLE: "Test pull request",
+        M6D_REVIEW_LEVEL: "thorough",
+      },
+      () => review.prepare({ github, context }),
+    );
+    const thoroughPrompt = fs.readFileSync(
+      path.join(directory, ".codex/review-prompt.md"),
+      "utf8",
+    );
+    assert.match(thoroughPrompt, /Thorough Review Workflow/);
+    assert.match(thoroughPrompt, /Correctness and reliability/);
+    assert.match(thoroughPrompt, /Security and trust boundaries/);
+    assert.match(thoroughPrompt, /Minimality and reuse/);
+    assert.match(thoroughPrompt, /Taste and consistency/);
   });
 
-  assert.equal(updates.length, 1);
-  assert.equal(updates[0].comment_id, 2);
+  assert.equal(updates.length, 2);
+  assert.deepEqual(
+    updates.map((update) => update.comment_id),
+    [2, 2],
+  );
 });
 
 test("review verdict fails closed and resolves only current PR threads", async () => {

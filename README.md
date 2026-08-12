@@ -23,6 +23,12 @@ on:
         description: PR number to review
         required: true
         type: string
+      review_level:
+        description: Review depth
+        required: false
+        default: standard
+        type: choice
+        options: [standard, thorough]
 
 permissions: {}
 
@@ -43,10 +49,13 @@ jobs:
       - uses: boring91/m6d-review-action@main
         with:
           mode: review
+          review-level: ${{ inputs.review_level || 'standard' }}
           base-branch: develop
           app-id: ${{ secrets.REVIEW_APP_ID }}
           app-private-key: ${{ secrets.REVIEW_APP_PRIVATE_KEY }}
 ```
+
+Pull-request events run a standard review. Run the workflow manually with `review_level: thorough`, or comment `@review thorough`, to have Codex delegate correctness, security, minimality, and taste reviews to four parallel subagents before verifying and combining their findings. Neither review level requires projects to have test coverage.
 
 ## Review command
 
@@ -126,11 +135,12 @@ The full-review workflow must remain named `review.yml` because command and repl
 ## Requirements
 
 - A self-hosted Linux runner with Codex CLI, Git, Bash, and `base64` available.
+- Thorough reviews require a current Codex CLI release with subagent support.
 - Codex CLI must already be authenticated on the runner.
 - A GitHub App installed on the consumer repository with Contents read permission and Issues, Pull requests, and Actions write permissions.
 - Repository secrets named `REVIEW_APP_ID` and `REVIEW_APP_PRIVATE_KEY`, or equivalent values passed to the action inputs.
 
-The action rejects drafts, forked pull requests, closed pull requests, and pull requests targeting a branch other than `base-branch`. Only owners, members, and collaborators can trigger `@review` commands or review-reply evaluations. Codex runs with `danger-full-access` and an approval policy of `never`.
+The action rejects drafts, forked pull requests, closed pull requests, and pull requests targeting a branch other than `base-branch`. Only owners, members, and collaborators can trigger `@review` or `@review thorough` commands or review-reply evaluations. Review runs use `gpt-5.6-sol`. Codex runs with `danger-full-access` and an approval policy of `never`.
 
 Use `@main` while developing. Pin production consumers to `@v1` or an exact commit SHA after verification.
 
