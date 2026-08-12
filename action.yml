@@ -106,7 +106,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        codex exec --ephemeral -c 'approval_policy="never"' --sandbox read-only --output-schema .codex/review-schema.json -o .codex/review.json - < .codex/review-prompt.md
+        codex exec --ephemeral -c 'approval_policy="never"' -c 'sandbox_mode="danger-full-access"' --output-schema .codex/review-schema.json -o .codex/review.json - < .codex/review-prompt.md
         test -s .codex/review.json
 
     - name: Submit pull-request review
@@ -236,7 +236,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        codex exec --ephemeral -c 'approval_policy="never"' --sandbox read-only --output-schema .codex/reply-schema.json -o .codex/reply.json - < .codex/reply-prompt.md
+        codex exec --ephemeral -c 'approval_policy="never"' -c 'sandbox_mode="danger-full-access"' --output-schema .codex/reply-schema.json -o .codex/reply.json - < .codex/reply-prompt.md
         test -s .codex/reply.json
 
     - name: Post review reply

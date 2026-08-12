@@ -128,7 +128,7 @@ The full-review workflow must remain named `review.yml` because command and repl
 - A GitHub App installed on the consumer repository with Contents read permission and Issues, Pull requests, and Actions write permissions.
 - Repository secrets named `REVIEW_APP_ID` and `REVIEW_APP_PRIVATE_KEY`, or equivalent values passed to the action inputs.
 
-The action rejects drafts, forked pull requests, closed pull requests, and pull requests targeting a branch other than `base-branch`. Only owners, members, and collaborators can trigger `@review` commands or review-reply evaluations. Codex runs with a read-only sandbox.
+The action rejects drafts, forked pull requests, closed pull requests, and pull requests targeting a branch other than `base-branch`. Only owners, members, and collaborators can trigger `@review` commands or review-reply evaluations. Codex runs with `danger-full-access` and an approval policy of `never`.
 
 Use `@main` while developing. Pin production consumers to `@v1` or an exact commit SHA after verification.
 
