@@ -1,0 +1,258 @@
+name: M6D Review
+description: Run Codex pull-request reviews, review commands, and thread replies.
+
+inputs:
+  mode:
+    description: "Event handler to run: review, command, or reply."
+    required: true
+  app-id:
+    description: GitHub App ID used to submit reviews and dispatch workflows.
+    required: true
+  app-private-key:
+    description: GitHub App private key.
+    required: true
+  base-branch:
+    description: Allowed pull-request base branch. Defaults to the repository default branch.
+    required: false
+    default: ""
+  review-workflow:
+    description: Workflow filename dispatched by @review and final thread resolution.
+    required: false
+    default: review.yml
+
+runs:
+  using: composite
+  steps:
+    - name: Validate action mode
+      shell: bash
+      env:
+        M6D_MODE: ${{ inputs.mode }}
+        M6D_EVENT_NAME: ${{ github.event_name }}
+      run: |
+        set -euo pipefail
+        case "$M6D_MODE:$M6D_EVENT_NAME" in
+          review:pull_request|review:workflow_dispatch|command:issue_comment|reply:pull_request_review_comment) ;;
+          *)
+            echo "::error::Mode $M6D_MODE does not support the $M6D_EVENT_NAME event"
+            exit 1
+            ;;
+        esac
+
+    - name: Create review app token
+      id: review-app-token
+      if: inputs.mode == 'review'
+      uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.app-private-key }}
+        permission-contents: read
+        permission-issues: write
+        permission-pull-requests: write
+
+    - name: Resolve pull-request context
+      id: pr
+      if: inputs.mode == 'review'
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+      env:
+        M6D_ACTION_PATH: ${{ github.action_path }}
+        M6D_PR_NUMBER: ${{ github.event.pull_request.number || github.event.inputs.pr_number }}
+        M6D_BASE_BRANCH: ${{ inputs.base-branch || github.event.repository.default_branch }}
+      with:
+        github-token: ${{ steps.review-app-token.outputs.token }}
+        script: |
+          const review = require(`${process.env.M6D_ACTION_PATH}/src/review.cjs`);
+          await review.resolve({ github, context, core });
+
+    - name: Check out pull request
+      if: inputs.mode == 'review'
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        ref: ${{ steps.pr.outputs.head_sha }}
+        fetch-depth: 0
+        persist-credentials: false
+        token: ${{ steps.review-app-token.outputs.token }}
+
+    - name: Fetch base branch
+      if: inputs.mode == 'review'
+      shell: bash
+      env:
+        BASE_REF: ${{ steps.pr.outputs.base_ref }}
+        REVIEW_APP_TOKEN: ${{ steps.review-app-token.outputs.token }}
+      run: |
+        set -euo pipefail
+        basic_auth="$(printf 'x-access-token:%s' "$REVIEW_APP_TOKEN" | base64 | tr -d '\n')"
+        git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${basic_auth}" fetch --no-tags origin "${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+
+    - name: Prepare Codex review
+      if: inputs.mode == 'review'
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+      env:
+        M6D_ACTION_PATH: ${{ github.action_path }}
+        M6D_PR_NUMBER: ${{ steps.pr.outputs.number }}
+        M6D_PR_TITLE: ${{ steps.pr.outputs.title }}
+        M6D_BASE_REF: ${{ steps.pr.outputs.base_ref }}
+        M6D_BASE_SHA: ${{ steps.pr.outputs.base_sha }}
+        M6D_HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        M6D_APP_SLUG: ${{ steps.review-app-token.outputs.app-slug }}
+      with:
+        github-token: ${{ steps.review-app-token.outputs.token }}
+        script: |
+          const review = require(`${process.env.M6D_ACTION_PATH}/src/review.cjs`);
+          await review.prepare({ github, context, core });
+
+    - name: Run Codex review
+      id: codex-review
+      if: inputs.mode == 'review'
+      shell: bash
+      run: |
+        set -euo pipefail
+        codex exec --ephemeral -c 'approval_policy="never"' --sandbox read-only --output-schema .codex/review-schema.json -o .codex/review.json - < .codex/review-prompt.md
+        test -s .codex/review.json
+
+    - name: Submit pull-request review
+      id: submit-review
+      if: inputs.mode == 'review' && steps.codex-review.outcome == 'success'
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+      env:
+        M6D_ACTION_PATH: ${{ github.action_path }}
+        M6D_PR_NUMBER: ${{ steps.pr.outputs.number }}
+        M6D_HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        M6D_APP_SLUG: ${{ steps.review-app-token.outputs.app-slug }}
+      with:
+        github-token: ${{ steps.review-app-token.outputs.token }}
+        script: |
+          const review = require(`${process.env.M6D_ACTION_PATH}/src/review.cjs`);
+          await review.submit({ github, context, core });
+
+    - name: Mark review as finished
+      if: inputs.mode == 'review' && always() && steps.review-app-token.outcome == 'success'
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+      env:
+        M6D_ACTION_PATH: ${{ github.action_path }}
+        M6D_CODEX_OUTCOME: ${{ steps.codex-review.outcome }}
+        M6D_REVIEW_OUTCOME: ${{ steps.submit-review.outcome }}
+        M6D_REVIEW_EVENT: ${{ steps.submit-review.outputs.review_event }}
+        M6D_MERGE_DECISION: ${{ steps.submit-review.outputs.merge_decision }}
+        M6D_QUALITY_SCORE: ${{ steps.submit-review.outputs.quality_score }}
+        M6D_INLINE_COUNT: ${{ steps.submit-review.outputs.inline_count }}
+        M6D_RESOLVED_THREAD_COUNT: ${{ steps.submit-review.outputs.resolved_thread_count }}
+        M6D_FAILED_THREAD_COUNT: ${{ steps.submit-review.outputs.failed_thread_resolution_count }}
+        M6D_REVIEW_URL: ${{ steps.submit-review.outputs.review_url }}
+        M6D_HEAD_SHA: ${{ steps.pr.outputs.head_sha || github.event.pull_request.head.sha }}
+        M6D_PR_NUMBER: ${{ steps.pr.outputs.number || github.event.pull_request.number || github.event.inputs.pr_number }}
+        M6D_APP_SLUG: ${{ steps.review-app-token.outputs.app-slug }}
+      with:
+        github-token: ${{ steps.review-app-token.outputs.token }}
+        script: |
+          const review = require(`${process.env.M6D_ACTION_PATH}/src/review.cjs`);
+          await review.finish({ github, context, core });
+
+    - name: Fail when merge is not recommended
+      if: inputs.mode == 'review' && steps.submit-review.outputs.merge_decision == 'DO_NOT_MERGE'
+      shell: bash
+      run: exit 1
+
+    - name: Create command app token
+      id: command-app-token
+      if: inputs.mode == 'command'
+      uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.app-private-key }}
+        permission-actions: write
+        permission-issues: write
+
+    - name: Dispatch requested review
+      if: inputs.mode == 'command'
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+      env:
+        M6D_ACTION_PATH: ${{ github.action_path }}
+        M6D_REVIEW_WORKFLOW: ${{ inputs.review-workflow }}
+      with:
+        github-token: ${{ steps.command-app-token.outputs.token }}
+        script: |
+          const dispatchReview = require(`${process.env.M6D_ACTION_PATH}/src/command.cjs`);
+          await dispatchReview({ github, context, core });
+
+    - name: Create reply app token
+      id: reply-app-token
+      if: inputs.mode == 'reply'
+      uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.app-private-key }}
+        permission-contents: read
+        permission-pull-requests: write
+        permission-actions: write
+
+    - name: Validate reply context
+      id: reply-context
+      if: inputs.mode == 'reply'
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+      env:
+        M6D_ACTION_PATH: ${{ github.action_path }}
+        M6D_BASE_BRANCH: ${{ inputs.base-branch || github.event.repository.default_branch }}
+      with:
+        github-token: ${{ steps.reply-app-token.outputs.token }}
+        script: |
+          const reply = require(`${process.env.M6D_ACTION_PATH}/src/reply.cjs`);
+          await reply.validate({ github, context, core });
+
+    - name: Check out pull-request head
+      if: inputs.mode == 'reply' && steps.reply-context.outputs.skip != 'true'
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        ref: ${{ steps.reply-context.outputs.head_sha }}
+        fetch-depth: 0
+        persist-credentials: false
+        token: ${{ steps.reply-app-token.outputs.token }}
+
+    - name: Fetch reply base branch
+      if: inputs.mode == 'reply' && steps.reply-context.outputs.skip != 'true'
+      shell: bash
+      env:
+        BASE_REF: ${{ steps.reply-context.outputs.base_ref }}
+        REVIEW_APP_TOKEN: ${{ steps.reply-app-token.outputs.token }}
+      run: |
+        set -euo pipefail
+        basic_auth="$(printf 'x-access-token:%s' "$REVIEW_APP_TOKEN" | base64 | tr -d '\n')"
+        git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${basic_auth}" fetch --no-tags origin "${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+
+    - name: Prepare reply evaluation
+      id: prepare-reply
+      if: inputs.mode == 'reply' && steps.reply-context.outputs.skip != 'true'
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+      env:
+        M6D_ACTION_PATH: ${{ github.action_path }}
+      with:
+        github-token: ${{ steps.reply-app-token.outputs.token }}
+        script: |
+          const reply = require(`${process.env.M6D_ACTION_PATH}/src/reply.cjs`);
+          await reply.prepare({ github, context, core });
+
+    - name: Run Codex reply evaluation
+      id: codex-reply
+      if: inputs.mode == 'reply' && steps.prepare-reply.outputs.skip != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        codex exec --ephemeral -c 'approval_policy="never"' --sandbox read-only --output-schema .codex/reply-schema.json -o .codex/reply.json - < .codex/reply-prompt.md
+        test -s .codex/reply.json
+
+    - name: Post review reply
+      if: inputs.mode == 'reply' && steps.prepare-reply.outputs.skip != 'true' && steps.codex-reply.outcome == 'success'
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+      env:
+        M6D_ACTION_PATH: ${{ github.action_path }}
+        M6D_ROOT_COMMENT_ID: ${{ steps.prepare-reply.outputs.root_comment_id }}
+        M6D_BOT_LOGIN: ${{ steps.prepare-reply.outputs.bot_login }}
+        M6D_REVIEW_WORKFLOW: ${{ inputs.review-workflow }}
+      with:
+        github-token: ${{ steps.reply-app-token.outputs.token }}
+        script: |
+          const reply = require(`${process.env.M6D_ACTION_PATH}/src/reply.cjs`);
+          await reply.post({ github, context, core });
+
+branding:
+  icon: eye
+  color: purple
