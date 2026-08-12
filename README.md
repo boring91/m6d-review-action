@@ -2,6 +2,8 @@
 
 A composite GitHub Action for Codex pull-request reviews, trusted `@review` commands, and replies to review threads created by the review bot.
 
+Review and reply instructions live in `src/prompts/review.md` and `src/prompts/reply.md`.
+
 The action has three modes because each mode is triggered by a different GitHub event. Consumer repositories keep three small workflow files while the review implementation lives here.
 
 ## Full review
