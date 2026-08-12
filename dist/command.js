@@ -24,6 +24,9 @@ async function dispatchReview({ github, context, core, }) {
         return;
     }
     const prNumber = issue.number;
+    const reviewLevel = /(^|\s)@review\s+thorough\b/i.test(body)
+        ? "thorough"
+        : "standard";
     try {
         await github.rest.reactions.createForIssueComment({
             owner,
@@ -35,7 +38,7 @@ async function dispatchReview({ github, context, core, }) {
     catch (error) {
         core.warning(`Could not react to the command comment: ${(0, helpers_js_1.errorMessage)(error)}`);
     }
-    core.info(`@review from ${comment.user.login}; dispatching review for PR #${prNumber}.`);
+    core.info(`@review from ${comment.user.login}; dispatching ${reviewLevel} review for PR #${prNumber}.`);
     const defaultBranch = context.payload.repository?.default_branch;
     if (!defaultBranch)
         throw new Error("Repository default branch is unavailable.");
@@ -44,6 +47,9 @@ async function dispatchReview({ github, context, core, }) {
         repo,
         workflow_id: process.env.M6D_REVIEW_WORKFLOW || "review.yml",
         ref: defaultBranch,
-        inputs: { pr_number: String(prNumber) },
+        inputs: {
+            pr_number: String(prNumber),
+            ...(reviewLevel === "thorough" ? { review_level: reviewLevel } : {}),
+        },
     });
 }

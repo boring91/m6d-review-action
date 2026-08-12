@@ -26,7 +26,7 @@ Also include these two lines near the top of `## Executive Summary`:
 Use this severity legend for findings in `## Review` and for inline comment severity:
 🔴 `CRITICAL`: security issue, data loss, auth bypass, production-breaking bug, or unusable critical path.
 🟠 `HIGH`: serious bug, broken user-facing workflow, significant regression, or required architectural/pattern fix.
-🟡 `MEDIUM`: correctness, maintainability, missing validation, missing test, or moderate pattern issue that should be fixed.
+🟡 `MEDIUM`: correctness, maintainability, missing validation, or moderate pattern issue that should be fixed.
 🔵 `LOW`: minor hygiene, small simplification, low-risk edge case, or localized style issue.
 🟢 `INFO`: non-blocking note, clarification, or optional improvement.
 
@@ -40,6 +40,7 @@ Code Review Guidelines:
 
 - Keep it concise, direct, and to the point
 - The review should be exhaustive; you need to keep on reviewing and finding issues until you cannot find any issues any more.
+- Review existing tests when relevant, but do not require test coverage. A project having no tests or a change lacking tests is not itself a finding.
 - Write a summary that has strictly these three sections:
   - A clear executive summary of the PR. Below it describe the before and after
   - The review itself, which should mainly focus of the following aspects:
