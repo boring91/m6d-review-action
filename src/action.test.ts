@@ -117,6 +117,9 @@ test("packaged prompts load independently of the working directory", async () =>
 test("review action pins GPT-5.6 Sol and caps thorough reviews at four agents", () => {
   const action = fs.readFileSync(path.join(__dirname, "../action.yml"), "utf8");
   assert.match(action, /--model gpt-5\.6-sol/);
+  assert.match(action, /review_args=\(--ephemeral\)/);
+  assert.match(action, /if \[\[ "\$M6D_REVIEW_LEVEL" == "thorough" \]\]; then\s+review_args=\(\s+-c/);
+  assert.match(action, /codex exec --model gpt-5\.6-sol "\$\{review_args\[@\]\}"/);
   assert.match(action, /agents\.enabled=true/);
   assert.match(action, /agents\.max_concurrent_threads_per_session=4/);
   assert.match(action, /agents\.default_subagent_model="gpt-5\.6-sol"/);
