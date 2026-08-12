@@ -1,4 +1,11 @@
+const fs = require("node:fs");
+const path = require("node:path");
+
 const TRUSTED_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+
+function readPrompt(name) {
+  return fs.readFileSync(path.join(__dirname, "prompts", name), "utf8").trim();
+}
 
 function parseJson(raw, label) {
   try {
@@ -33,4 +40,10 @@ function isTrustedAssociation(value) {
   return TRUSTED_ASSOCIATIONS.has(value);
 }
 
-module.exports = { isTrustedAssociation, parseJson, quote, truncate };
+module.exports = {
+  isTrustedAssociation,
+  parseJson,
+  quote,
+  readPrompt,
+  truncate,
+};

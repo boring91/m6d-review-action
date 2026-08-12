@@ -7,6 +7,7 @@ const {
   isTrustedAssociation,
   parseJson,
   quote,
+  readPrompt,
   truncate,
 } = require("./helpers.cjs");
 const reply = require("./reply.cjs");
@@ -81,6 +82,13 @@ test("helpers parse output and enforce trusted associations", () => {
   assert.equal(quote("one\ntwo"), "> one\n> two");
   assert.equal(isTrustedAssociation("MEMBER"), true);
   assert.equal(isTrustedAssociation("CONTRIBUTOR"), false);
+});
+
+test("packaged prompts load independently of the working directory", async () => {
+  await inTemporaryDirectory(() => {
+    assert.match(readPrompt("review.md"), /\{\{repository\}\}/);
+    assert.match(readPrompt("reply.md"), /\{\{repository\}\}/);
+  });
 });
 
 test("reply validation rejects untrusted authors", async () => {
@@ -160,8 +168,8 @@ test("status updates only the current GitHub App comment", async () => {
     payload: { pull_request: pullRequest() },
   };
 
-  await inTemporaryDirectory(() =>
-    withEnvironment(
+  await inTemporaryDirectory(async (directory) => {
+    await withEnvironment(
       {
         M6D_APP_SLUG: "m6d-review",
         M6D_BASE_REF: "main",
@@ -170,8 +178,14 @@ test("status updates only the current GitHub App comment", async () => {
         M6D_PR_TITLE: "Test pull request",
       },
       () => review.prepare({ github, context }),
-    ),
-  );
+    );
+    const prompt = fs.readFileSync(
+      path.join(directory, ".codex/review-prompt.md"),
+      "utf8",
+    );
+    assert.match(prompt, /pull request for acme\/project/);
+    assert.doesNotMatch(prompt, /\{\{repository\}\}/);
+  });
 
   assert.equal(updates.length, 1);
   assert.equal(updates[0].comment_id, 2);
