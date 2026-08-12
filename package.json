@@ -1,0 +1,13 @@
+{
+  "name": "m6d-review-action",
+  "private": true,
+  "scripts": {
+    "build": "rm -rf dist && tsc && mkdir -p dist/prompts && cp src/prompts/*.md dist/prompts/",
+    "test": "npm run build && node --test dist/action.test.js",
+    "check": "npm test && git diff --exit-code -- dist"
+  },
+  "devDependencies": {
+    "@types/node": "26.2.0",
+    "typescript": "7.0.2"
+  }
+}

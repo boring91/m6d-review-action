@@ -1,12 +1,17 @@
-const { isTrustedAssociation } = require("./helpers.cjs");
+import { errorMessage, isTrustedAssociation } from "./helpers.js";
+import type { HandlerOptions } from "./types.js";
 
-module.exports = async function dispatchReview({ github, context, core }) {
+export async function dispatchReview({
+  github,
+  context,
+  core,
+}: HandlerOptions): Promise<void> {
   const { owner, repo } = context.repo;
   const issue = context.payload.issue;
   const comment = context.payload.comment;
   const body = comment?.body || "";
 
-  if (!issue?.pull_request || issue.state !== "open") {
+  if (!issue?.pull_request || issue.state !== "open" || !comment) {
     core.notice("Comment is not on an open pull request; skipping.");
     return;
   }
@@ -34,17 +39,19 @@ module.exports = async function dispatchReview({ github, context, core }) {
       content: "eyes",
     });
   } catch (error) {
-    core.warning(`Could not react to the command comment: ${error.message}`);
+    core.warning(`Could not react to the command comment: ${errorMessage(error)}`);
   }
 
   core.info(
     `@review from ${comment.user.login}; dispatching review for PR #${prNumber}.`,
   );
+  const defaultBranch = context.payload.repository?.default_branch;
+  if (!defaultBranch) throw new Error("Repository default branch is unavailable.");
   await github.rest.actions.createWorkflowDispatch({
     owner,
     repo,
-    workflow_id: process.env.M6D_REVIEW_WORKFLOW,
-    ref: context.payload.repository.default_branch,
+    workflow_id: process.env.M6D_REVIEW_WORKFLOW || "review.yml",
+    ref: defaultBranch,
     inputs: { pr_number: String(prNumber) },
   });
-};
+}

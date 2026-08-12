@@ -60,7 +60,7 @@ runs:
       with:
         github-token: ${{ steps.review-app-token.outputs.token }}
         script: |
-          const review = require(`${process.env.M6D_ACTION_PATH}/src/review.cjs`);
+          const review = require(`${process.env.M6D_ACTION_PATH}/dist/review.js`);
           await review.resolve({ github, context, core });
 
     - name: Check out pull request
@@ -97,7 +97,7 @@ runs:
       with:
         github-token: ${{ steps.review-app-token.outputs.token }}
         script: |
-          const review = require(`${process.env.M6D_ACTION_PATH}/src/review.cjs`);
+          const review = require(`${process.env.M6D_ACTION_PATH}/dist/review.js`);
           await review.prepare({ github, context, core });
 
     - name: Run Codex review
@@ -121,7 +121,7 @@ runs:
       with:
         github-token: ${{ steps.review-app-token.outputs.token }}
         script: |
-          const review = require(`${process.env.M6D_ACTION_PATH}/src/review.cjs`);
+          const review = require(`${process.env.M6D_ACTION_PATH}/dist/review.js`);
           await review.submit({ github, context, core });
 
     - name: Mark review as finished
@@ -144,7 +144,7 @@ runs:
       with:
         github-token: ${{ steps.review-app-token.outputs.token }}
         script: |
-          const review = require(`${process.env.M6D_ACTION_PATH}/src/review.cjs`);
+          const review = require(`${process.env.M6D_ACTION_PATH}/dist/review.js`);
           await review.finish({ github, context, core });
 
     - name: Fail when merge is not recommended
@@ -171,7 +171,7 @@ runs:
       with:
         github-token: ${{ steps.command-app-token.outputs.token }}
         script: |
-          const dispatchReview = require(`${process.env.M6D_ACTION_PATH}/src/command.cjs`);
+          const { dispatchReview } = require(`${process.env.M6D_ACTION_PATH}/dist/command.js`);
           await dispatchReview({ github, context, core });
 
     - name: Create reply app token
@@ -195,7 +195,7 @@ runs:
       with:
         github-token: ${{ steps.reply-app-token.outputs.token }}
         script: |
-          const reply = require(`${process.env.M6D_ACTION_PATH}/src/reply.cjs`);
+          const reply = require(`${process.env.M6D_ACTION_PATH}/dist/reply.js`);
           await reply.validate({ github, context, core });
 
     - name: Check out pull-request head
@@ -227,7 +227,7 @@ runs:
       with:
         github-token: ${{ steps.reply-app-token.outputs.token }}
         script: |
-          const reply = require(`${process.env.M6D_ACTION_PATH}/src/reply.cjs`);
+          const reply = require(`${process.env.M6D_ACTION_PATH}/dist/reply.js`);
           await reply.prepare({ github, context, core });
 
     - name: Run Codex reply evaluation
@@ -250,7 +250,7 @@ runs:
       with:
         github-token: ${{ steps.reply-app-token.outputs.token }}
         script: |
-          const reply = require(`${process.env.M6D_ACTION_PATH}/src/reply.cjs`);
+          const reply = require(`${process.env.M6D_ACTION_PATH}/dist/reply.js`);
           await reply.post({ github, context, core });
 
 branding:
