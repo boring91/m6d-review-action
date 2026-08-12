@@ -136,8 +136,11 @@ Use `@main` while developing. Pin production consumers to `@v1` or an exact comm
 
 ## Verification
 
-Run the dependency-free behavioral tests:
+Install dependencies, compile the TypeScript source, and run the behavioral tests:
 
 ```bash
-node --test
+npm ci
+npm test
 ```
+
+Compiled files in `dist/` are committed so consumers can run the action without installing dependencies.

@@ -1,36 +1,51 @@
-const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const os = require("node:os");
-const path = require("node:path");
-const { test } = require("node:test");
-const {
+import * as assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { test } from "node:test";
+
+import {
   isTrustedAssociation,
   parseJson,
   quote,
   readPrompt,
   truncate,
-} = require("./helpers.cjs");
-const reply = require("./reply.cjs");
-const review = require("./review.cjs");
+} from "./helpers.js";
+import * as reply from "./reply.js";
+import * as review from "./review.js";
+import type { Context, Core, GitHub, PullRequest } from "./types.js";
 
-function createCore() {
-  const outputs = {};
-  const warnings = [];
+type AnyRecord = Record<string, any>;
+
+type TestCore = Core & {
+  outputs: Record<string, unknown>;
+  warnings: string[];
+  failures: string[];
+};
+
+function createCore(): TestCore {
+  const outputs: Record<string, unknown> = {};
+  const warnings: string[] = [];
+  const failures: string[] = [];
   return {
     outputs,
     warnings,
-    info() {},
-    notice() {},
-    setOutput(name, value) {
+    failures,
+    info(_message: string) {},
+    notice(_message: string) {},
+    setFailed(message: string) {
+      failures.push(message);
+    },
+    setOutput(name: string, value: unknown) {
       outputs[name] = value;
     },
-    warning(message) {
+    warning(message: string) {
       warnings.push(message);
     },
   };
 }
 
-function pullRequest() {
+function pullRequest(): PullRequest {
   return {
     number: 42,
     title: "Test pull request",
@@ -47,7 +62,10 @@ function pullRequest() {
   };
 }
 
-async function withEnvironment(values, run) {
+async function withEnvironment(
+  values: Record<string, string>,
+  run: () => void | Promise<void>,
+): Promise<void> {
   const previous = Object.fromEntries(
     Object.keys(values).map((key) => [key, process.env[key]]),
   );
@@ -62,7 +80,9 @@ async function withEnvironment(values, run) {
   }
 }
 
-async function inTemporaryDirectory(run) {
+async function inTemporaryDirectory(
+  run: (directory: string) => void | Promise<void>,
+): Promise<void> {
   const previous = process.cwd();
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "m6d-review-"));
   try {
@@ -92,12 +112,13 @@ test("packaged prompts load independently of the working directory", async () =>
 });
 
 test("reply validation rejects untrusted authors", async () => {
-  const context = {
+  const context: Context = {
     repo: { owner: "acme", repo: "project" },
     payload: {
       pull_request: pullRequest(),
       comment: {
-        user: { type: "User" },
+        id: 8,
+        user: { login: "contributor", type: "User" },
         author_association: "CONTRIBUTOR",
         in_reply_to_id: 7,
       },
@@ -109,13 +130,13 @@ test("reply validation rejects untrusted authors", async () => {
     await reply.validate({ context, core: untrusted });
     assert.equal(untrusted.outputs.skip, "true");
 
-    context.payload.comment.author_association = "MEMBER";
+    context.payload.comment!.author_association = "MEMBER";
     const trusted = createCore();
     await reply.validate({ context, core: trusted });
     assert.equal(trusted.outputs.skip, "false");
     assert.equal(trusted.outputs.head_sha, "head-sha");
 
-    context.payload.pull_request.state = "closed";
+    context.payload.pull_request!.state = "closed";
     const closed = createCore();
     await reply.validate({ context, core: closed });
     assert.equal(closed.outputs.skip, "true");
@@ -125,7 +146,7 @@ test("reply validation rejects untrusted authors", async () => {
 test("status updates only the current GitHub App comment", async () => {
   const listComments = () => {};
   const listReviews = () => {};
-  const updates = [];
+  const updates: AnyRecord[] = [];
   const comments = [
     {
       id: 1,
@@ -145,13 +166,14 @@ test("status updates only the current GitHub App comment", async () => {
     rest: {
       issues: {
         listComments,
-        updateComment: async (payload) => updates.push(payload),
+        updateComment: async (payload: AnyRecord) => updates.push(payload),
         createComment: async () =>
           assert.fail("should update the existing app comment"),
       },
       pulls: { listReviews },
     },
-    paginate: async (endpoint) => (endpoint === listReviews ? [] : comments),
+    paginate: async (endpoint: unknown) =>
+      endpoint === listReviews ? [] : comments,
     graphql: async () => ({
       repository: {
         pullRequest: {
@@ -162,8 +184,8 @@ test("status updates only the current GitHub App comment", async () => {
         },
       },
     }),
-  };
-  const context = {
+  } as unknown as GitHub;
+  const context: Context = {
     repo: { owner: "acme", repo: "project" },
     payload: { pull_request: pullRequest() },
   };
@@ -193,23 +215,23 @@ test("status updates only the current GitHub App comment", async () => {
 
 test("review verdict fails closed and resolves only current PR threads", async () => {
   const core = createCore();
-  const reviews = [];
-  const resolved = [];
-  let blockedDecision;
-  let blockedFailedThreads;
-  let blockedResolvedThreads;
+  const reviews: AnyRecord[] = [];
+  const resolved: string[] = [];
+  let blockedDecision: unknown;
+  let blockedFailedThreads: unknown;
+  let blockedResolvedThreads: unknown;
   const github = {
     rest: {
       issues: { createComment: async () => {} },
       pulls: {
-        createReview: async (payload) => {
+        createReview: async (payload: AnyRecord) => {
           reviews.push(payload);
           return { data: { html_url: "https://example.test/review" } };
         },
         createReviewComment: async () => {},
       },
     },
-    graphql: async (query, variables) => {
+    graphql: async (query: string, variables: AnyRecord) => {
       if (query.includes("reviewThreads(first:")) {
         return {
           repository: {
@@ -245,8 +267,11 @@ test("review verdict fails closed and resolves only current PR threads", async (
       }
       throw new Error("Unexpected GraphQL request.");
     },
+  } as unknown as GitHub;
+  const context: Context = {
+    repo: { owner: "acme", repo: "project" },
+    payload: {},
   };
-  const context = { repo: { owner: "acme", repo: "project" } };
 
   await inTemporaryDirectory(async (directory) => {
     fs.mkdirSync(path.join(directory, ".codex"));

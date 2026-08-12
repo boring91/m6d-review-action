@@ -1,13 +1,39 @@
-const fs = require("node:fs");
-const {
+import * as fs from "node:fs";
+
+import {
+  errorMessage,
   isTrustedAssociation,
   parseJson,
   quote,
   readPrompt,
   truncate,
-} = require("./helpers.cjs");
+} from "./helpers.js";
+import type { HandlerOptions } from "./types.js";
 
-async function validate({ context, core }) {
+type ReplyResult = {
+  evaluation_completed: boolean;
+  should_respond: boolean;
+  assessment:
+    | "RESOLVED"
+    | "STILL_OPEN"
+    | "NEEDS_CLARIFICATION"
+    | "ACKNOWLEDGED";
+  reply_markdown: string;
+  reason: string | null;
+};
+
+type ReplyThread = {
+  id: string;
+  isResolved: boolean;
+  comments: {
+    nodes: Array<{ databaseId: number; author?: { login: string } }>;
+  };
+};
+
+export async function validate({
+  context,
+  core,
+}: Pick<HandlerOptions, "context" | "core">): Promise<void> {
   const pr = context.payload.pull_request;
   const comment = context.payload.comment;
   const expectedRepo = `${context.repo.owner}/${context.repo.repo}`;
@@ -37,6 +63,7 @@ async function validate({ context, core }) {
     core.setOutput("skip", "true");
     return;
   }
+  if (!pr) return;
 
   core.setOutput("skip", "false");
   core.setOutput("head_sha", pr.head.sha);
@@ -44,10 +71,17 @@ async function validate({ context, core }) {
   core.setOutput("base_sha", pr.base.sha);
 }
 
-async function prepare({ github, context, core }) {
+export async function prepare({
+  github,
+  context,
+  core,
+}: HandlerOptions): Promise<void> {
   const { owner, repo } = context.repo;
   const pr = context.payload.pull_request;
   const triggerComment = context.payload.comment;
+  if (!pr || !triggerComment) {
+    throw new Error("Pull request and trigger comment are required.");
+  }
   const pullNumber = pr.number;
 
   let botLogin = "";
@@ -55,10 +89,10 @@ async function prepare({ github, context, core }) {
     const viewer = await github.graphql("{ viewer { login } }");
     botLogin = viewer.viewer.login;
   } catch (error) {
-    core.warning(`Could not determine bot identity: ${error.message}`);
+    core.warning(`Could not determine bot identity: ${errorMessage(error)}`);
   }
 
-  const skip = (reason) => {
+  const skip = (reason: string): void => {
     core.notice(reason);
     core.setOutput("skip", "true");
   };
@@ -90,7 +124,9 @@ async function prepare({ github, context, core }) {
       (comment) => comment.id === rootId || comment.in_reply_to_id === rootId,
     )
     .sort(
-      (left, right) => new Date(left.created_at) - new Date(right.created_at),
+      (left, right) =>
+        new Date(left.created_at).getTime() -
+        new Date(right.created_at).getTime(),
     );
   const marker = `<!-- codex-reply:${triggerComment.id} -->`;
   const alreadyReplied = thread.some(
@@ -204,13 +240,22 @@ async function prepare({ github, context, core }) {
   core.setOutput("bot_login", botLogin);
 }
 
-async function post({ github, context, core }) {
+export async function post({
+  github,
+  context,
+  core,
+}: HandlerOptions): Promise<void> {
   const { owner, repo } = context.repo;
-  const pullNumber = context.payload.pull_request.number;
+  const pr = context.payload.pull_request;
+  const triggerComment = context.payload.comment;
+  if (!pr || !triggerComment) {
+    throw new Error("Pull request and trigger comment are required.");
+  }
+  const pullNumber = pr.number;
   const rootId = Number(process.env.M6D_ROOT_COMMENT_ID);
   const botLogin = process.env.M6D_BOT_LOGIN || "";
-  const triggerId = context.payload.comment.id;
-  const result = parseJson(
+  const triggerId = triggerComment.id;
+  const result = parseJson<ReplyResult>(
     fs.readFileSync(".codex/reply.json", "utf8").trim(),
     "Codex reply output",
   );
@@ -266,8 +311,8 @@ async function post({ github, context, core }) {
         }
       }
     }`;
-  const threads = [];
-  let cursor = null;
+  const threads: ReplyThread[] = [];
+  let cursor: string | null = null;
 
   do {
     const result = await github.graphql(query, {
@@ -276,7 +321,10 @@ async function post({ github, context, core }) {
       num: pullNumber,
       cursor,
     });
-    const connection = result.repository.pullRequest.reviewThreads;
+    const connection = result.repository.pullRequest.reviewThreads as {
+      nodes: ReplyThread[];
+      pageInfo: { hasNextPage: boolean; endCursor: string | null };
+    };
     threads.push(...connection.nodes);
     cursor = connection.pageInfo.hasNextPage
       ? connection.pageInfo.endCursor
@@ -314,13 +362,13 @@ async function post({ github, context, core }) {
   if (remaining.length > 0) return;
 
   core.info("No unresolved review threads remain; dispatching a final review.");
+  const defaultBranch = context.payload.repository?.default_branch;
+  if (!defaultBranch) throw new Error("Repository default branch is unavailable.");
   await github.rest.actions.createWorkflowDispatch({
     owner,
     repo,
     workflow_id: process.env.M6D_REVIEW_WORKFLOW,
-    ref: context.payload.repository.default_branch,
+    ref: defaultBranch,
     inputs: { pr_number: String(pullNumber) },
   });
 }
-
-module.exports = { post, prepare, validate };

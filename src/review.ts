@@ -1,5 +1,13 @@
-const fs = require("node:fs");
-const { parseJson, quote, readPrompt, truncate } = require("./helpers.cjs");
+import * as fs from "node:fs";
+
+import {
+  errorMessage,
+  parseJson,
+  quote,
+  readPrompt,
+  truncate,
+} from "./helpers.js";
+import type { Core, GitHub, HandlerOptions, PullRequest } from "./types.js";
 
 const MARKER = "<!-- codex-review-status -->";
 const SEVERITY = {
@@ -10,7 +18,66 @@ const SEVERITY = {
   INFO: "🟢 INFO",
 };
 
-async function resolve({ github, context, core }) {
+type Severity = keyof typeof SEVERITY;
+
+type ReviewThreadComment = {
+  author?: { login: string };
+  body?: string;
+  createdAt?: string;
+  path?: string;
+  line?: number;
+  originalLine?: number;
+};
+
+type ReviewThread = {
+  id: string;
+  isResolved: boolean;
+  isOutdated?: boolean;
+  viewerCanResolve?: boolean;
+  path?: string;
+  line?: number;
+  startLine?: number;
+  originalLine?: number;
+  originalStartLine?: number;
+  diffSide?: string;
+  comments: { nodes: ReviewThreadComment[] };
+};
+
+type ModelComment = {
+  path: string;
+  line: number;
+  side: "RIGHT" | "LEFT";
+  start_line: number | null;
+  start_side: "RIGHT" | "LEFT" | null;
+  severity: Severity;
+  body: string;
+};
+
+type InlineComment = {
+  path: string;
+  line: number;
+  side: "RIGHT" | "LEFT";
+  body: string;
+  start_line?: number;
+  start_side?: "RIGHT" | "LEFT";
+};
+
+type ReviewResult = {
+  event: "APPROVE" | "REQUEST_CHANGES";
+  merge_decision: "MERGE" | "DO_NOT_MERGE";
+  quality_score: number;
+  review_completed: boolean;
+  failure_reason: string | null;
+  body: string;
+  comments: ModelComment[];
+  resolved_thread_ids: string[];
+};
+
+export async function resolve({
+  github,
+  context,
+  core,
+}: HandlerOptions): Promise<void> {
   const { owner, repo } = context.repo;
   const pullRequest =
     context.payload.pull_request ??
@@ -20,7 +87,7 @@ async function resolve({ github, context, core }) {
         repo,
         pull_number: Number(process.env.M6D_PR_NUMBER),
       })
-    ).data;
+    ).data as PullRequest;
   const expectedRepo = `${owner}/${repo}`;
   const expectedBase = process.env.M6D_BASE_BRANCH;
   const problems = [];
@@ -50,7 +117,7 @@ async function resolve({ github, context, core }) {
   core.setOutput("title", pullRequest.title ?? "");
 }
 
-function reviewSchema() {
+function reviewSchema(): Record<string, unknown> {
   return {
     $schema: "https://json-schema.org/draft/2020-12/schema",
     type: "object",
@@ -110,11 +177,16 @@ function reviewSchema() {
   };
 }
 
-function reviewPrompt(repository) {
+function reviewPrompt(repository: string): string {
   return readPrompt("review.md").replace("{{repository}}", repository);
 }
 
-async function listThreads(github, owner, repo, pullNumber) {
+async function listThreads(
+  github: GitHub,
+  owner: string,
+  repo: string,
+  pullNumber: number,
+): Promise<ReviewThread[]> {
   const query = `
     query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
       repository(owner: $owner, name: $repo) {
@@ -147,8 +219,8 @@ async function listThreads(github, owner, repo, pullNumber) {
         }
       }
     }`;
-  const nodes = [];
-  let cursor = null;
+  const nodes: ReviewThread[] = [];
+  let cursor: string | null = null;
 
   do {
     const result = await github.graphql(query, {
@@ -157,7 +229,10 @@ async function listThreads(github, owner, repo, pullNumber) {
       number: pullNumber,
       cursor,
     });
-    const threads = result.repository.pullRequest.reviewThreads;
+    const threads = result.repository.pullRequest.reviewThreads as {
+      nodes: ReviewThread[];
+      pageInfo: { hasNextPage: boolean; endCursor: string | null };
+    };
     nodes.push(...threads.nodes);
     cursor = threads.pageInfo.hasNextPage ? threads.pageInfo.endCursor : null;
   } while (cursor);
@@ -165,7 +240,13 @@ async function listThreads(github, owner, repo, pullNumber) {
   return nodes;
 }
 
-async function upsertStatus(github, owner, repo, pullNumber, body) {
+async function upsertStatus(
+  github: GitHub,
+  owner: string,
+  repo: string,
+  pullNumber: number,
+  body: string,
+): Promise<void> {
   const appSlug = process.env.M6D_APP_SLUG;
   if (!appSlug) throw new Error("GitHub App slug is unavailable.");
 
@@ -200,7 +281,10 @@ async function upsertStatus(github, owner, repo, pullNumber, body) {
   });
 }
 
-async function prepare({ github, context }) {
+export async function prepare({
+  github,
+  context,
+}: Pick<HandlerOptions, "github" | "context">): Promise<void> {
   const { owner, repo } = context.repo;
   const pullRequest =
     context.payload.pull_request ??
@@ -210,7 +294,7 @@ async function prepare({ github, context }) {
         repo,
         pull_number: Number(process.env.M6D_PR_NUMBER),
       })
-    ).data;
+    ).data as PullRequest;
   const pullNumber = pullRequest.number;
 
   await upsertStatus(
@@ -222,7 +306,7 @@ async function prepare({ github, context }) {
       MARKER,
       "## Codex Review",
       "",
-      `Codex is reviewing commit \`${process.env.M6D_HEAD_SHA.slice(0, 7)}\`.`,
+      `Codex is reviewing commit \`${(process.env.M6D_HEAD_SHA || "").slice(0, 7)}\`.`,
       "",
       "This comment is updated on each push.",
     ].join("\n"),
@@ -352,21 +436,29 @@ async function prepare({ github, context }) {
   );
 }
 
-function normalizePath(value) {
+function normalizePath(value: unknown): string {
   return String(value ?? "")
     .trim()
     .replace(/^[ab]\//, "");
 }
 
-function commentBody(comment) {
-  const key = SEVERITY[comment.severity] ? comment.severity : "MEDIUM";
+function commentBody(comment: ModelComment): string {
+  const key: Severity = SEVERITY[comment.severity]
+    ? comment.severity
+    : "MEDIUM";
   const label = SEVERITY[key];
   const body = truncate(comment.body, 4000);
   return body ? (body.startsWith(label) ? body : `${label}\n\n${body}`) : "";
 }
 
-function inlineComments(source) {
-  const result = { comments: [], omitted: 0 };
+function inlineComments(source: ModelComment[]): {
+  comments: InlineComment[];
+  omitted: number;
+} {
+  const result: { comments: InlineComment[]; omitted: number } = {
+    comments: [],
+    omitted: 0,
+  };
 
   for (const comment of source) {
     const path = normalizePath(comment.path);
@@ -378,7 +470,7 @@ function inlineComments(source) {
       continue;
     }
 
-    const payload = { path, line, side, body };
+    const payload: InlineComment = { path, line, side, body };
     const startLine = Number(comment.start_line);
     const startSide = comment.start_side === "LEFT" ? "LEFT" : side;
     if (Number.isInteger(startLine) && startLine > 0 && startLine <= line) {
@@ -392,7 +484,14 @@ function inlineComments(source) {
   return result;
 }
 
-async function resolveThreads(github, core, owner, repo, pullNumber, ids) {
+async function resolveThreads(
+  github: GitHub,
+  core: Core,
+  owner: string,
+  repo: string,
+  pullNumber: number,
+  ids: string[],
+): Promise<{ ok: number; failed: number }> {
   const unique = [
     ...new Set(ids.map((id) => String(id ?? "").trim()).filter(Boolean)),
   ].slice(0, 50);
@@ -436,7 +535,7 @@ async function resolveThreads(github, core, owner, repo, pullNumber, ids) {
     } catch (error) {
       failed += 1;
       core.warning(
-        `Could not resolve review thread ${threadId}: ${error.message}`,
+        `Could not resolve review thread ${threadId}: ${errorMessage(error)}`,
       );
     }
   }
@@ -444,10 +543,14 @@ async function resolveThreads(github, core, owner, repo, pullNumber, ids) {
   return { ok, failed };
 }
 
-async function submit({ github, context, core }) {
+export async function submit({
+  github,
+  context,
+  core,
+}: HandlerOptions): Promise<void> {
   const { owner, repo } = context.repo;
   const pullNumber = Number(process.env.M6D_PR_NUMBER);
-  const review = parseJson(
+  const review = parseJson<ReviewResult>(
     fs.readFileSync(".codex/review.json", "utf8").trim(),
     "Codex review output",
   );
@@ -482,7 +585,7 @@ async function submit({ github, context, core }) {
     body += `\n\nWorkflow note: ${inline.omitted} inline comment(s) were omitted because they were missing path, line, or body.`;
   }
 
-  let created;
+  let created: { data: { html_url?: string } };
   let postedInline = inline.comments.length;
   try {
     created = await github.rest.pulls.createReview({
@@ -496,7 +599,7 @@ async function submit({ github, context, core }) {
   } catch (error) {
     if (inline.comments.length === 0) throw error;
     core.warning(
-      `Batched review submission failed; retrying inline comments individually: ${error.message}`,
+      `Batched review submission failed; retrying inline comments individually: ${errorMessage(error)}`,
     );
     created = await github.rest.pulls.createReview({
       owner,
@@ -519,7 +622,7 @@ async function submit({ github, context, core }) {
       } catch (commentError) {
         rejected += 1;
         core.warning(
-          `Dropped inline comment at ${comment.path}:${comment.line}: ${commentError.message}`,
+          `Dropped inline comment at ${comment.path}:${comment.line}: ${errorMessage(commentError)}`,
         );
       }
     }
@@ -552,7 +655,10 @@ async function submit({ github, context, core }) {
   core.setOutput("review_url", created.data.html_url ?? "");
 }
 
-async function finish({ github, context }) {
+export async function finish({
+  github,
+  context,
+}: Pick<HandlerOptions, "github" | "context">): Promise<void> {
   const { owner, repo } = context.repo;
   const pullNumber = Number(process.env.M6D_PR_NUMBER);
   const failed = process.env.M6D_FAILED_THREAD_COUNT || "0";
@@ -616,10 +722,3 @@ async function finish({ github, context }) {
 
   await upsertStatus(github, owner, repo, pullNumber, body);
 }
-
-module.exports = {
-  finish,
-  prepare,
-  resolve,
-  submit,
-};
