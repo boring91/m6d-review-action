@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 
 import {
   errorMessage,
+  normalizeBotLogin,
   parseJson,
   quote,
   readPrompt,
@@ -259,12 +260,12 @@ async function upsertStatus(
     issue_number: pullNumber,
     per_page: 100,
   });
-  const appLogin = `${appSlug}[bot]`.toLowerCase();
+  const appLogin = normalizeBotLogin(appSlug);
   const existing = comments.find(
     (comment) =>
       comment.body?.includes(MARKER) &&
       (comment.performed_via_github_app?.slug === appSlug ||
-        comment.user?.login?.toLowerCase() === appLogin),
+        normalizeBotLogin(comment.user?.login) === appLogin),
   );
 
   if (existing) {
@@ -507,7 +508,7 @@ async function resolveThreads(
 
   const appSlug = process.env.M6D_APP_SLUG;
   if (!appSlug) throw new Error("GitHub App slug is unavailable.");
-  const appLogin = `${appSlug}[bot]`.toLowerCase();
+  const appLogin = normalizeBotLogin(appSlug);
 
   const currentThreads = new Map(
     (await listThreads(github, owner, repo, pullNumber)).map((thread) => [
@@ -521,7 +522,9 @@ async function resolveThreads(
       const thread = currentThreads.get(threadId);
       if (!thread)
         throw new Error("Review thread does not belong to this pull request.");
-      if (thread.comments.nodes[0]?.author?.login?.toLowerCase() !== appLogin) {
+      if (
+        normalizeBotLogin(thread.comments.nodes[0]?.author?.login) !== appLogin
+      ) {
         throw new Error("Review thread was not created by this GitHub App.");
       }
 

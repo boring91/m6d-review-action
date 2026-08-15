@@ -38,6 +38,7 @@ exports.parseJson = parseJson;
 exports.truncate = truncate;
 exports.quote = quote;
 exports.isTrustedAssociation = isTrustedAssociation;
+exports.normalizeBotLogin = normalizeBotLogin;
 exports.errorMessage = errorMessage;
 const fs = __importStar(require("node:fs"));
 const path = __importStar(require("node:path"));
@@ -73,6 +74,13 @@ function quote(value, max = 2500) {
 }
 function isTrustedAssociation(value) {
     return typeof value === "string" && TRUSTED_ASSOCIATIONS.has(value);
+}
+function normalizeBotLogin(value) {
+    const login = String(value ?? "")
+        .trim()
+        .replace(/\[bot\]$/i, "")
+        .toLowerCase();
+    return login ? `${login}[bot]` : "";
 }
 function errorMessage(error) {
     return error instanceof Error ? error.message : String(error);

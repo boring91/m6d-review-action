@@ -6,6 +6,7 @@ import { test } from "node:test";
 
 import {
   isTrustedAssociation,
+  normalizeBotLogin,
   parseJson,
   quote,
   readPrompt,
@@ -103,6 +104,8 @@ test("helpers parse output and enforce trusted associations", () => {
   assert.equal(quote("one\ntwo"), "> one\n> two");
   assert.equal(isTrustedAssociation("MEMBER"), true);
   assert.equal(isTrustedAssociation("CONTRIBUTOR"), false);
+  assert.equal(normalizeBotLogin("m6d-review"), "m6d-review[bot]");
+  assert.equal(normalizeBotLogin("M6D-Review[BOT]"), "m6d-review[bot]");
 });
 
 test("packaged prompts load independently of the working directory", async () => {
@@ -123,6 +126,11 @@ test("review action pins GPT-5.6 Sol and caps thorough reviews at four agents", 
   assert.match(action, /agents\.enabled=true/);
   assert.match(action, /agents\.max_concurrent_threads_per_session=4/);
   assert.match(action, /agents\.default_subagent_model="gpt-5\.6-sol"/);
+});
+
+test("thread handlers request repository write access", () => {
+  const action = fs.readFileSync(path.join(__dirname, "../action.yml"), "utf8");
+  assert.equal(action.match(/permission-contents: write/g)?.length, 2);
 });
 
 test("review commands dispatch standard and thorough levels", async () => {
@@ -319,7 +327,7 @@ test("review verdict fails closed and resolves only current PR threads", async (
                     isResolved: false,
                     viewerCanResolve: true,
                     comments: {
-                      nodes: [{ author: { login: "m6d-review[bot]" } }],
+                      nodes: [{ author: { login: "m6d-review" } }],
                     },
                   },
                   {

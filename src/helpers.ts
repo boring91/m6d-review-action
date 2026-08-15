@@ -40,6 +40,14 @@ export function isTrustedAssociation(value: unknown): boolean {
   return typeof value === "string" && TRUSTED_ASSOCIATIONS.has(value);
 }
 
+export function normalizeBotLogin(value: unknown): string {
+  const login = String(value ?? "")
+    .trim()
+    .replace(/\[bot\]$/i, "")
+    .toLowerCase();
+  return login ? `${login}[bot]` : "";
+}
+
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }

@@ -57,7 +57,7 @@ runs:
       with:
         app-id: ${{ inputs.app-id }}
         private-key: ${{ inputs.app-private-key }}
-        permission-contents: read
+        permission-contents: write
         permission-issues: write
         permission-pull-requests: write
 
@@ -204,7 +204,7 @@ runs:
       with:
         app-id: ${{ inputs.app-id }}
         private-key: ${{ inputs.app-private-key }}
-        permission-contents: read
+        permission-contents: write
         permission-pull-requests: write
         permission-actions: write
 

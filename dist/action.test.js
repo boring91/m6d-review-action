@@ -114,6 +114,8 @@ async function inTemporaryDirectory(run) {
     assert.equal((0, helpers_js_1.quote)("one\ntwo"), "> one\n> two");
     assert.equal((0, helpers_js_1.isTrustedAssociation)("MEMBER"), true);
     assert.equal((0, helpers_js_1.isTrustedAssociation)("CONTRIBUTOR"), false);
+    assert.equal((0, helpers_js_1.normalizeBotLogin)("m6d-review"), "m6d-review[bot]");
+    assert.equal((0, helpers_js_1.normalizeBotLogin)("M6D-Review[BOT]"), "m6d-review[bot]");
 });
 (0, node_test_1.test)("packaged prompts load independently of the working directory", async () => {
     await inTemporaryDirectory(() => {
@@ -132,6 +134,10 @@ async function inTemporaryDirectory(run) {
     assert.match(action, /agents\.enabled=true/);
     assert.match(action, /agents\.max_concurrent_threads_per_session=4/);
     assert.match(action, /agents\.default_subagent_model="gpt-5\.6-sol"/);
+});
+(0, node_test_1.test)("thread handlers request repository write access", () => {
+    const action = fs.readFileSync(path.join(__dirname, "../action.yml"), "utf8");
+    assert.equal(action.match(/permission-contents: write/g)?.length, 2);
 });
 (0, node_test_1.test)("review commands dispatch standard and thorough levels", async () => {
     const dispatches = [];
@@ -298,7 +304,7 @@ async function inTemporaryDirectory(run) {
                                         isResolved: false,
                                         viewerCanResolve: true,
                                         comments: {
-                                            nodes: [{ author: { login: "m6d-review[bot]" } }],
+                                            nodes: [{ author: { login: "m6d-review" } }],
                                         },
                                     },
                                     {
