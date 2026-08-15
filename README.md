@@ -137,8 +137,10 @@ The full-review workflow must remain named `review.yml` because command and repl
 - A self-hosted Linux runner with Codex CLI, Git, Bash, and `base64` available.
 - Thorough reviews require a current Codex CLI release with subagent support.
 - Codex CLI must already be authenticated on the runner.
-- A GitHub App installed on the consumer repository with Contents read permission and Issues, Pull requests, and Actions write permissions.
+- A GitHub App installed on the consumer repository with Contents, Issues, Pull requests, and Actions write permissions.
 - Repository secrets named `REVIEW_APP_ID` and `REVIEW_APP_PRIVATE_KEY`, or equivalent values passed to the action inputs.
+
+Contents write permission is required because GitHub gates review-thread resolution on repository write access, even when the token already has Pull requests write permission.
 
 The action rejects drafts, forked pull requests, closed pull requests, and pull requests targeting a branch other than `base-branch`. Only owners, members, and collaborators can trigger `@review` or `@review thorough` commands or review-reply evaluations. Review runs use `gpt-5.6-sol`. Codex runs with `danger-full-access` and an approval policy of `never`.
 

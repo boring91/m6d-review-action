@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import {
   errorMessage,
   isTrustedAssociation,
+  normalizeBotLogin,
   parseJson,
   quote,
   readPrompt,
@@ -87,7 +88,7 @@ export async function prepare({
   let botLogin = "";
   try {
     const viewer = await github.graphql("{ viewer { login } }");
-    botLogin = viewer.viewer.login;
+    botLogin = normalizeBotLogin(viewer.viewer.login);
   } catch (error) {
     core.warning(`Could not determine bot identity: ${errorMessage(error)}`);
   }
@@ -113,7 +114,7 @@ export async function prepare({
   if (!root) return skip("Thread root comment not found; skipping.");
   if (!botLogin)
     return skip("Could not determine the review bot identity; skipping.");
-  if (root.user.login !== botLogin) {
+  if (normalizeBotLogin(root.user.login) !== botLogin) {
     return skip(
       `Thread started by ${root.user.login}, not ${botLogin}; skipping.`,
     );
@@ -131,7 +132,8 @@ export async function prepare({
   const marker = `<!-- codex-reply:${triggerComment.id} -->`;
   const alreadyReplied = thread.some(
     (comment) =>
-      comment.user.login === botLogin && (comment.body || "").includes(marker),
+      normalizeBotLogin(comment.user.login) === botLogin &&
+      (comment.body || "").includes(marker),
   );
   if (alreadyReplied) return skip("Already replied to this comment; skipping.");
 
@@ -165,8 +167,8 @@ export async function prepare({
 
   for (const comment of thread) {
     const who =
-      comment.user.login === botLogin
-        ? `${comment.user.login} (you, the reviewer)`
+      normalizeBotLogin(comment.user.login) === botLogin
+        ? `${botLogin} (you, the reviewer)`
         : comment.user.login;
     lines.push(
       `### ${who} at ${comment.created_at}`,
@@ -253,7 +255,7 @@ export async function post({
   }
   const pullNumber = pr.number;
   const rootId = Number(process.env.M6D_ROOT_COMMENT_ID);
-  const botLogin = process.env.M6D_BOT_LOGIN || "";
+  const botLogin = normalizeBotLogin(process.env.M6D_BOT_LOGIN);
   const triggerId = triggerComment.id;
   const result = parseJson<ReplyResult>(
     fs.readFileSync(".codex/reply.json", "utf8").trim(),
@@ -356,7 +358,7 @@ export async function post({
     (thread) =>
       thread.id !== target.id &&
       !thread.isResolved &&
-      thread.comments.nodes[0]?.author?.login === botLogin,
+      normalizeBotLogin(thread.comments.nodes[0]?.author?.login) === botLogin,
   );
   core.info(`${remaining.length} unresolved ${botLogin} thread(s) remain.`);
   if (remaining.length > 0) return;

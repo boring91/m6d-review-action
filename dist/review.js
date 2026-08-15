@@ -201,10 +201,10 @@ async function upsertStatus(github, owner, repo, pullNumber, body) {
         issue_number: pullNumber,
         per_page: 100,
     });
-    const appLogin = `${appSlug}[bot]`.toLowerCase();
+    const appLogin = (0, helpers_js_1.normalizeBotLogin)(appSlug);
     const existing = comments.find((comment) => comment.body?.includes(MARKER) &&
         (comment.performed_via_github_app?.slug === appSlug ||
-            comment.user?.login?.toLowerCase() === appLogin));
+            (0, helpers_js_1.normalizeBotLogin)(comment.user?.login) === appLogin));
     if (existing) {
         await github.rest.issues.updateComment({
             owner,
@@ -371,7 +371,7 @@ async function resolveThreads(github, core, owner, repo, pullNumber, ids) {
     const appSlug = process.env.M6D_APP_SLUG;
     if (!appSlug)
         throw new Error("GitHub App slug is unavailable.");
-    const appLogin = `${appSlug}[bot]`.toLowerCase();
+    const appLogin = (0, helpers_js_1.normalizeBotLogin)(appSlug);
     const currentThreads = new Map((await listThreads(github, owner, repo, pullNumber)).map((thread) => [
         thread.id,
         thread,
@@ -381,7 +381,7 @@ async function resolveThreads(github, core, owner, repo, pullNumber, ids) {
             const thread = currentThreads.get(threadId);
             if (!thread)
                 throw new Error("Review thread does not belong to this pull request.");
-            if (thread.comments.nodes[0]?.author?.login?.toLowerCase() !== appLogin) {
+            if ((0, helpers_js_1.normalizeBotLogin)(thread.comments.nodes[0]?.author?.login) !== appLogin) {
                 throw new Error("Review thread was not created by this GitHub App.");
             }
             core.info(`Thread ${threadId}: isResolved=${thread.isResolved}, viewerCanResolve=${thread.viewerCanResolve}.`);

@@ -84,7 +84,7 @@ async function prepare({ github, context, core, }) {
     let botLogin = "";
     try {
         const viewer = await github.graphql("{ viewer { login } }");
-        botLogin = viewer.viewer.login;
+        botLogin = (0, helpers_js_1.normalizeBotLogin)(viewer.viewer.login);
     }
     catch (error) {
         core.warning(`Could not determine bot identity: ${(0, helpers_js_1.errorMessage)(error)}`);
@@ -107,7 +107,7 @@ async function prepare({ github, context, core, }) {
         return skip("Thread root comment not found; skipping.");
     if (!botLogin)
         return skip("Could not determine the review bot identity; skipping.");
-    if (root.user.login !== botLogin) {
+    if ((0, helpers_js_1.normalizeBotLogin)(root.user.login) !== botLogin) {
         return skip(`Thread started by ${root.user.login}, not ${botLogin}; skipping.`);
     }
     const thread = allComments
@@ -115,7 +115,8 @@ async function prepare({ github, context, core, }) {
         .sort((left, right) => new Date(left.created_at).getTime() -
         new Date(right.created_at).getTime());
     const marker = `<!-- codex-reply:${triggerComment.id} -->`;
-    const alreadyReplied = thread.some((comment) => comment.user.login === botLogin && (comment.body || "").includes(marker));
+    const alreadyReplied = thread.some((comment) => (0, helpers_js_1.normalizeBotLogin)(comment.user.login) === botLogin &&
+        (comment.body || "").includes(marker));
     if (alreadyReplied)
         return skip("Already replied to this comment; skipping.");
     const path = root.path ?? triggerComment.path ?? "unknown";
@@ -145,8 +146,8 @@ async function prepare({ github, context, core, }) {
         "",
     ];
     for (const comment of thread) {
-        const who = comment.user.login === botLogin
-            ? `${comment.user.login} (you, the reviewer)`
+        const who = (0, helpers_js_1.normalizeBotLogin)(comment.user.login) === botLogin
+            ? `${botLogin} (you, the reviewer)`
             : comment.user.login;
         lines.push(`### ${who} at ${comment.created_at}`, "", (0, helpers_js_1.quote)(comment.body, 4000), "");
     }
@@ -202,7 +203,7 @@ async function post({ github, context, core, }) {
     }
     const pullNumber = pr.number;
     const rootId = Number(process.env.M6D_ROOT_COMMENT_ID);
-    const botLogin = process.env.M6D_BOT_LOGIN || "";
+    const botLogin = (0, helpers_js_1.normalizeBotLogin)(process.env.M6D_BOT_LOGIN);
     const triggerId = triggerComment.id;
     const result = (0, helpers_js_1.parseJson)(fs.readFileSync(".codex/reply.json", "utf8").trim(), "Codex reply output");
     if (result.evaluation_completed !== true) {
@@ -278,7 +279,7 @@ async function post({ github, context, core, }) {
     }
     const remaining = threads.filter((thread) => thread.id !== target.id &&
         !thread.isResolved &&
-        thread.comments.nodes[0]?.author?.login === botLogin);
+        (0, helpers_js_1.normalizeBotLogin)(thread.comments.nodes[0]?.author?.login) === botLogin);
     core.info(`${remaining.length} unresolved ${botLogin} thread(s) remain.`);
     if (remaining.length > 0)
         return;
