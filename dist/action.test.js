@@ -302,7 +302,8 @@ async function inTemporaryDirectory(run) {
                                     {
                                         id: "current-thread",
                                         isResolved: false,
-                                        viewerCanResolve: true,
+                                        // GitHub App tokens can report false even when the mutation succeeds.
+                                        viewerCanResolve: false,
                                         comments: {
                                             nodes: [{ author: { login: "m6d-review" } }],
                                         },
