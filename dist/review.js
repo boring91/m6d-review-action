@@ -153,7 +153,6 @@ async function listThreads(github, owner, repo, pullNumber) {
               id
               isResolved
               isOutdated
-              viewerCanResolve
               path
               line
               startLine
@@ -384,10 +383,7 @@ async function resolveThreads(github, core, owner, repo, pullNumber, ids) {
             if ((0, helpers_js_1.normalizeBotLogin)(thread.comments.nodes[0]?.author?.login) !== appLogin) {
                 throw new Error("Review thread was not created by this GitHub App.");
             }
-            core.info(`Thread ${threadId}: isResolved=${thread.isResolved}, viewerCanResolve=${thread.viewerCanResolve}.`);
-            if (!thread.isResolved && !thread.viewerCanResolve) {
-                throw new Error("Review thread cannot be resolved by this GitHub App.");
-            }
+            core.info(`Thread ${threadId}: isResolved=${thread.isResolved}.`);
             if (!thread.isResolved) {
                 await github.graphql("mutation($threadId: ID!) { resolveReviewThread(input: {threadId: $threadId}) { thread { id isResolved } } }", { threadId });
             }

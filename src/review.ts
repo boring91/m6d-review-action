@@ -34,7 +34,6 @@ type ReviewThread = {
   id: string;
   isResolved: boolean;
   isOutdated?: boolean;
-  viewerCanResolve?: boolean;
   path?: string;
   line?: number;
   startLine?: number;
@@ -200,7 +199,6 @@ async function listThreads(
               id
               isResolved
               isOutdated
-              viewerCanResolve
               path
               line
               startLine
@@ -528,12 +526,7 @@ async function resolveThreads(
         throw new Error("Review thread was not created by this GitHub App.");
       }
 
-      core.info(
-        `Thread ${threadId}: isResolved=${thread.isResolved}, viewerCanResolve=${thread.viewerCanResolve}.`,
-      );
-      if (!thread.isResolved && !thread.viewerCanResolve) {
-        throw new Error("Review thread cannot be resolved by this GitHub App.");
-      }
+      core.info(`Thread ${threadId}: isResolved=${thread.isResolved}.`);
       if (!thread.isResolved) {
         await github.graphql(
           "mutation($threadId: ID!) { resolveReviewThread(input: {threadId: $threadId}) { thread { id isResolved } } }",

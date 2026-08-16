@@ -325,7 +325,8 @@ test("review verdict fails closed and resolves only current PR threads", async (
                   {
                     id: "current-thread",
                     isResolved: false,
-                    viewerCanResolve: true,
+                    // GitHub App tokens can report false even when the mutation succeeds.
+                    viewerCanResolve: false,
                     comments: {
                       nodes: [{ author: { login: "m6d-review" } }],
                     },
