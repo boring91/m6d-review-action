@@ -113,6 +113,7 @@ test("packaged prompts load independently of the working directory", async () =>
     assert.match(readPrompt("review.md"), /\{\{repository\}\}/);
     assert.match(readPrompt("review-thorough.md"), /spawn exactly four subagents/i);
     assert.match(readPrompt("review.md"), /do not require test coverage/i);
+    assert.match(readPrompt("review.md"), /dismissed_threads/);
     assert.match(readPrompt("reply.md"), /\{\{repository\}\}/);
   });
 });
@@ -301,6 +302,7 @@ test("review verdict fails closed and resolves only current PR threads", async (
   const core = createCore();
   const reviews: AnyRecord[] = [];
   const resolved: string[] = [];
+  const replies: AnyRecord[] = [];
   let blockedDecision: unknown;
   let blockedFailedThreads: unknown;
   let blockedResolvedThreads: unknown;
@@ -313,6 +315,8 @@ test("review verdict fails closed and resolves only current PR threads", async (
           return { data: { html_url: "https://example.test/review" } };
         },
         createReviewComment: async () => {},
+        createReplyForReviewComment: async (payload: AnyRecord) =>
+          replies.push(payload),
       },
     },
     graphql: async (query: string, variables: AnyRecord) => {
@@ -328,7 +332,9 @@ test("review verdict fails closed and resolves only current PR threads", async (
                     // GitHub App tokens can report false even when the mutation succeeds.
                     viewerCanResolve: false,
                     comments: {
-                      nodes: [{ author: { login: "m6d-review" } }],
+                      nodes: [
+                        { databaseId: 1, author: { login: "m6d-review" } },
+                      ],
                     },
                   },
                   {
@@ -336,7 +342,19 @@ test("review verdict fails closed and resolves only current PR threads", async (
                     isResolved: false,
                     viewerCanResolve: true,
                     comments: {
-                      nodes: [{ author: { login: "human-reviewer" } }],
+                      nodes: [
+                        { databaseId: 2, author: { login: "human-reviewer" } },
+                      ],
+                    },
+                  },
+                  {
+                    id: "stale-thread",
+                    isResolved: false,
+                    viewerCanResolve: false,
+                    comments: {
+                      nodes: [
+                        { databaseId: 3, author: { login: "m6d-review" } },
+                      ],
                     },
                   },
                 ],
@@ -375,6 +393,12 @@ test("review verdict fails closed and resolves only current PR threads", async (
           "human-thread",
           "foreign-thread",
         ],
+        dismissed_threads: [
+          {
+            thread_id: "stale-thread",
+            reason: "No longer applicable after the refactor.",
+          },
+        ],
       }),
     );
     await withEnvironment(
@@ -400,6 +424,7 @@ test("review verdict fails closed and resolves only current PR threads", async (
         body: "Approved",
         comments: [],
         resolved_thread_ids: [],
+        dismissed_threads: [],
       }),
     );
     await withEnvironment(
@@ -416,9 +441,24 @@ test("review verdict fails closed and resolves only current PR threads", async (
   assert.equal(blockedDecision, "DO_NOT_MERGE");
   assert.equal(reviews[1].event, "APPROVE");
   assert.equal(core.outputs.merge_decision, "MERGE");
-  assert.deepEqual(resolved, ["current-thread"]);
-  assert.equal(blockedResolvedThreads, "1");
+  // First run: model-listed threads. Second run (APPROVE): leftover bot
+  // threads are swept, with a reply explaining the resolution; the mock
+  // always reports isResolved=false so both bot threads recur.
+  assert.deepEqual(resolved, [
+    "current-thread",
+    "stale-thread",
+    "current-thread",
+    "stale-thread",
+  ]);
+  assert.deepEqual(
+    replies.map((reply) => reply.comment_id),
+    [3, 1, 3],
+  );
+  assert.match(replies[0].body, /No longer applicable after the refactor/);
+  assert.match(replies[1].body, /approved this PR without re-raising/);
+  assert.equal(blockedResolvedThreads, "2");
   assert.equal(blockedFailedThreads, "2");
+  assert.equal(core.outputs.resolved_thread_count, "2");
   assert.match(core.warnings.join("\n"), /was not created by this GitHub App/);
   assert.match(
     core.warnings.join("\n"),

@@ -92,6 +92,7 @@ function reviewSchema() {
             "body",
             "comments",
             "resolved_thread_ids",
+            "dismissed_threads",
         ],
         properties: {
             event: { type: "string", enum: ["APPROVE", "REQUEST_CHANGES"] },
@@ -134,6 +135,19 @@ function reviewSchema() {
                 maxItems: 50,
                 items: { type: "string", minLength: 1 },
             },
+            dismissed_threads: {
+                type: "array",
+                maxItems: 50,
+                items: {
+                    type: "object",
+                    additionalProperties: false,
+                    required: ["thread_id", "reason"],
+                    properties: {
+                        thread_id: { type: "string", minLength: 1 },
+                        reason: { type: "string", minLength: 1 },
+                    },
+                },
+            },
         },
     };
 }
@@ -161,6 +175,7 @@ async function listThreads(github, owner, repo, pullNumber) {
               diffSide
               comments(first: 20) {
                 nodes {
+                  databaseId
                   author { login }
                   body
                   createdAt
@@ -359,13 +374,15 @@ function inlineComments(source) {
     result.comments = result.comments.slice(0, 50);
     return result;
 }
-async function resolveThreads(github, core, owner, repo, pullNumber, ids) {
-    const unique = [
-        ...new Set(ids.map((id) => String(id ?? "").trim()).filter(Boolean)),
-    ].slice(0, 50);
+async function resolveThreads(github, core, owner, repo, pullNumber, entries, resolveLeftovers) {
+    const seen = new Set();
+    const unique = entries
+        .map((entry) => ({ ...entry, id: String(entry.id ?? "").trim() }))
+        .filter((entry) => entry.id && !seen.has(entry.id) && !!seen.add(entry.id))
+        .slice(0, 50);
     let ok = 0;
     let failed = 0;
-    if (unique.length === 0)
+    if (unique.length === 0 && !resolveLeftovers)
         return { ok, failed };
     const appSlug = process.env.M6D_APP_SLUG;
     if (!appSlug)
@@ -375,23 +392,45 @@ async function resolveThreads(github, core, owner, repo, pullNumber, ids) {
         thread.id,
         thread,
     ]));
-    for (const threadId of unique) {
+    if (resolveLeftovers) {
+        for (const thread of currentThreads.values()) {
+            if (!thread.isResolved &&
+                !seen.has(thread.id) &&
+                (0, helpers_js_1.normalizeBotLogin)(thread.comments.nodes[0]?.author?.login) === appLogin) {
+                unique.push({
+                    id: thread.id,
+                    reply: "Resolving: the latest review approved this PR without re-raising this finding.",
+                });
+            }
+        }
+    }
+    for (const entry of unique) {
         try {
-            const thread = currentThreads.get(threadId);
+            const thread = currentThreads.get(entry.id);
             if (!thread)
                 throw new Error("Review thread does not belong to this pull request.");
             if ((0, helpers_js_1.normalizeBotLogin)(thread.comments.nodes[0]?.author?.login) !== appLogin) {
                 throw new Error("Review thread was not created by this GitHub App.");
             }
-            core.info(`Thread ${threadId}: isResolved=${thread.isResolved}.`);
+            core.info(`Thread ${entry.id}: isResolved=${thread.isResolved}.`);
             if (!thread.isResolved) {
-                await github.graphql("mutation($threadId: ID!) { resolveReviewThread(input: {threadId: $threadId}) { thread { id isResolved } } }", { threadId });
+                const rootCommentId = thread.comments.nodes[0]?.databaseId;
+                if (entry.reply && rootCommentId) {
+                    await github.rest.pulls.createReplyForReviewComment({
+                        owner,
+                        repo,
+                        pull_number: pullNumber,
+                        comment_id: rootCommentId,
+                        body: (0, helpers_js_1.truncate)(entry.reply, 2000),
+                    });
+                }
+                await github.graphql("mutation($threadId: ID!) { resolveReviewThread(input: {threadId: $threadId}) { thread { id isResolved } } }", { threadId: entry.id });
             }
             ok += 1;
         }
         catch (error) {
             failed += 1;
-            core.warning(`Could not resolve review thread ${threadId}: ${(0, helpers_js_1.errorMessage)(error)}`);
+            core.warning(`Could not resolve review thread ${entry.id}: ${(0, helpers_js_1.errorMessage)(error)}`);
         }
     }
     return { ok, failed };
@@ -410,6 +449,9 @@ async function submit({ github, context, core, }) {
     const comments = Array.isArray(review.comments) ? review.comments : [];
     const resolvedIds = Array.isArray(review.resolved_thread_ids)
         ? review.resolved_thread_ids
+        : [];
+    const dismissed = Array.isArray(review.dismissed_threads)
+        ? review.dismissed_threads
         : [];
     const inline = inlineComments(comments);
     const canApprove = review.event === "APPROVE" &&
@@ -472,7 +514,13 @@ async function submit({ github, context, core, }) {
             });
         }
     }
-    const resolved = await resolveThreads(github, core, owner, repo, pullNumber, resolvedIds);
+    const resolved = await resolveThreads(github, core, owner, repo, pullNumber, [
+        ...resolvedIds.map((id) => ({ id })),
+        ...dismissed.map((entry) => ({
+            id: entry.thread_id,
+            reply: entry.reason,
+        })),
+    ], event === "APPROVE");
     core.setOutput("review_event", event);
     core.setOutput("merge_decision", mergeDecision);
     core.setOutput("quality_score", String(quality));

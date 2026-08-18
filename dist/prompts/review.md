@@ -16,6 +16,7 @@ Return JSON only, matching `.codex/review-schema.json`:
   `## Previous Review Comments`
 - `comments`: inline review comments for concrete findings. Use current diff paths and line numbers. Set `side` to `"RIGHT"` unless commenting on a removed line. Set `start_line` and `start_side` to `null` for single-line comments. Set `severity` to `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, or `INFO`. Keep comments concise and actionable. Leave this empty when approving.
 - `resolved_thread_ids`: array of unresolved prior review thread IDs from `.codex/pr-context.md` that were started by the review bot and are clearly fixed by the current PR. Use an empty array when none should be resolved. Never include another reviewer's thread or a thread when you are uncertain.
+- `dismissed_threads`: array of `{ "thread_id", "reason" }` objects for unresolved review-bot threads from `.codex/pr-context.md` whose finding you now judge no longer applicable — mistaken, outdated, or not worth blocking on — rather than fixed by code. Each `reason` is posted as a reply in that thread before it is resolved, so write one or two sentences addressed to the thread's readers explaining why it is being closed. Use an empty array when none apply, and never include another reviewer's thread.
 
 In `## Executive Summary`, describe the PR clearly. Include the before and after.
 
@@ -32,7 +33,7 @@ Use this severity legend for findings in `## Review` and for inline comment seve
 
 In `## Review`, prefix every finding heading or bullet with the matching colored-circle emoji and severity label, for example `🔴 CRITICAL:`. Focus on security vulnerabilities, critical bugs or mis-implementations, deviations from existing code patterns, unnecessarily complex solutions, repetitive code or code hygiene issues, and styling mistakes. Be concise, direct, and exhaustive.
 
-In `## Previous Review Comments`, read `.codex/pr-context.md`. If any previous review comment is still unresolved in the current diff, call it out here and add an inline comment when the line still exists. If an unresolved previous review thread is clearly fixed, mention it and include its thread ID in `resolved_thread_ids`. If there are no previous comments or none remain applicable, say that directly.
+In `## Previous Review Comments`, read `.codex/pr-context.md`. If any previous review comment is still unresolved in the current diff, call it out here and add an inline comment when the line still exists. If an unresolved previous review thread is clearly fixed, mention it and include its thread ID in `resolved_thread_ids`. If it is no longer applicable rather than fixed, put it in `dismissed_threads` with the reason instead of leaving it open. If there are no previous comments or none remain applicable, say that directly.
 
 Review the diff against the base branch. Do not modify files, do not commit, and do not post anything yourself. Produce only the JSON review object. If you cannot inspect the diff, set `review_completed` to `false`.
 

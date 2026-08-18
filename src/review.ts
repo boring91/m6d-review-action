@@ -22,6 +22,7 @@ const SEVERITY = {
 type Severity = keyof typeof SEVERITY;
 
 type ReviewThreadComment = {
+  databaseId?: number;
   author?: { login: string };
   body?: string;
   createdAt?: string;
@@ -71,6 +72,7 @@ type ReviewResult = {
   body: string;
   comments: ModelComment[];
   resolved_thread_ids: string[];
+  dismissed_threads: Array<{ thread_id: string; reason: string }>;
 };
 
 export async function resolve({
@@ -131,6 +133,7 @@ function reviewSchema(): Record<string, unknown> {
       "body",
       "comments",
       "resolved_thread_ids",
+      "dismissed_threads",
     ],
     properties: {
       event: { type: "string", enum: ["APPROVE", "REQUEST_CHANGES"] },
@@ -173,6 +176,19 @@ function reviewSchema(): Record<string, unknown> {
         maxItems: 50,
         items: { type: "string", minLength: 1 },
       },
+      dismissed_threads: {
+        type: "array",
+        maxItems: 50,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["thread_id", "reason"],
+          properties: {
+            thread_id: { type: "string", minLength: 1 },
+            reason: { type: "string", minLength: 1 },
+          },
+        },
+      },
     },
   };
 }
@@ -207,6 +223,7 @@ async function listThreads(
               diffSide
               comments(first: 20) {
                 nodes {
+                  databaseId
                   author { login }
                   body
                   createdAt
@@ -489,20 +506,25 @@ function inlineComments(source: ModelComment[]): {
   return result;
 }
 
+type ResolveEntry = { id: string; reply?: string };
+
 async function resolveThreads(
   github: GitHub,
   core: Core,
   owner: string,
   repo: string,
   pullNumber: number,
-  ids: string[],
+  entries: ResolveEntry[],
+  resolveLeftovers: boolean,
 ): Promise<{ ok: number; failed: number }> {
-  const unique = [
-    ...new Set(ids.map((id) => String(id ?? "").trim()).filter(Boolean)),
-  ].slice(0, 50);
+  const seen = new Set<string>();
+  const unique = entries
+    .map((entry) => ({ ...entry, id: String(entry.id ?? "").trim() }))
+    .filter((entry) => entry.id && !seen.has(entry.id) && !!seen.add(entry.id))
+    .slice(0, 50);
   let ok = 0;
   let failed = 0;
-  if (unique.length === 0) return { ok, failed };
+  if (unique.length === 0 && !resolveLeftovers) return { ok, failed };
 
   const appSlug = process.env.M6D_APP_SLUG;
   if (!appSlug) throw new Error("GitHub App slug is unavailable.");
@@ -515,9 +537,25 @@ async function resolveThreads(
     ]),
   );
 
-  for (const threadId of unique) {
+  if (resolveLeftovers) {
+    for (const thread of currentThreads.values()) {
+      if (
+        !thread.isResolved &&
+        !seen.has(thread.id) &&
+        normalizeBotLogin(thread.comments.nodes[0]?.author?.login) === appLogin
+      ) {
+        unique.push({
+          id: thread.id,
+          reply:
+            "Resolving: the latest review approved this PR without re-raising this finding.",
+        });
+      }
+    }
+  }
+
+  for (const entry of unique) {
     try {
-      const thread = currentThreads.get(threadId);
+      const thread = currentThreads.get(entry.id);
       if (!thread)
         throw new Error("Review thread does not belong to this pull request.");
       if (
@@ -526,18 +564,28 @@ async function resolveThreads(
         throw new Error("Review thread was not created by this GitHub App.");
       }
 
-      core.info(`Thread ${threadId}: isResolved=${thread.isResolved}.`);
+      core.info(`Thread ${entry.id}: isResolved=${thread.isResolved}.`);
       if (!thread.isResolved) {
+        const rootCommentId = thread.comments.nodes[0]?.databaseId;
+        if (entry.reply && rootCommentId) {
+          await github.rest.pulls.createReplyForReviewComment({
+            owner,
+            repo,
+            pull_number: pullNumber,
+            comment_id: rootCommentId,
+            body: truncate(entry.reply, 2000),
+          });
+        }
         await github.graphql(
           "mutation($threadId: ID!) { resolveReviewThread(input: {threadId: $threadId}) { thread { id isResolved } } }",
-          { threadId },
+          { threadId: entry.id },
         );
       }
       ok += 1;
     } catch (error) {
       failed += 1;
       core.warning(
-        `Could not resolve review thread ${threadId}: ${errorMessage(error)}`,
+        `Could not resolve review thread ${entry.id}: ${errorMessage(error)}`,
       );
     }
   }
@@ -572,6 +620,9 @@ export async function submit({
   const comments = Array.isArray(review.comments) ? review.comments : [];
   const resolvedIds = Array.isArray(review.resolved_thread_ids)
     ? review.resolved_thread_ids
+    : [];
+  const dismissed = Array.isArray(review.dismissed_threads)
+    ? review.dismissed_threads
     : [];
   const inline = inlineComments(comments);
   const canApprove =
@@ -646,7 +697,14 @@ export async function submit({
     owner,
     repo,
     pullNumber,
-    resolvedIds,
+    [
+      ...resolvedIds.map((id) => ({ id })),
+      ...dismissed.map((entry) => ({
+        id: entry.thread_id,
+        reply: entry.reason,
+      })),
+    ],
+    event === "APPROVE",
   );
   core.setOutput("review_event", event);
   core.setOutput("merge_decision", mergeDecision);
