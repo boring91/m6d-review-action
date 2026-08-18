@@ -376,10 +376,15 @@ function inlineComments(source) {
 }
 async function resolveThreads(github, core, owner, repo, pullNumber, entries, resolveLeftovers) {
     const seen = new Set();
-    const unique = entries
-        .map((entry) => ({ ...entry, id: String(entry.id ?? "").trim() }))
-        .filter((entry) => entry.id && !seen.has(entry.id) && !!seen.add(entry.id))
-        .slice(0, 50);
+    const unique = [];
+    for (const entry of entries) {
+        const id = String(entry.id ?? "").trim();
+        // 100 = combined schema cap (50 resolved + 50 dismissed).
+        if (!id || seen.has(id) || unique.length >= 100)
+            continue;
+        seen.add(id);
+        unique.push({ ...entry, id });
+    }
     let ok = 0;
     let failed = 0;
     if (unique.length === 0 && !resolveLeftovers)
