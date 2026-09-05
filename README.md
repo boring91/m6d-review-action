@@ -139,7 +139,7 @@ The full-review workflow must remain named `review.yml` because command and repl
 
 Contents write permission is required because GitHub gates review-thread resolution on repository write access, even when the token already has Pull requests write permission.
 
-The action rejects drafts, forked pull requests, closed pull requests, and pull requests targeting a branch other than `base-branch`. Only owners, members, and collaborators can trigger `@review` commands or review-reply evaluations. Review and reply runs use `gpt-5.6-sol` with `xhigh` reasoning effort. Codex runs with `danger-full-access` and an approval policy of `never`.
+The action rejects drafts, forked pull requests, closed pull requests, and pull requests targeting a branch other than `base-branch`. Only owners, members, and collaborators can trigger `@review` commands or review-reply evaluations. A command comment must consist of exactly `@review`; mentions inside longer text are ignored. Review and reply runs use `gpt-5.6-sol` with `xhigh` reasoning effort. Codex runs with `danger-full-access` and an approval policy of `never`.
 
 Use `@main` while developing. Pin production consumers to `@v1` or an exact commit SHA after verification.
 

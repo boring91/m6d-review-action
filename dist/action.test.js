@@ -138,7 +138,7 @@ async function inTemporaryDirectory(run) {
     const action = fs.readFileSync(path.join(__dirname, "../action.yml"), "utf8");
     assert.equal(action.match(/permission-contents: write/g)?.length, 2);
 });
-(0, node_test_1.test)("review commands dispatch standard and thorough levels", async () => {
+(0, node_test_1.test)("review commands dispatch the review workflow", async () => {
     const dispatches = [];
     const context = {
         repo: { owner: "acme", repo: "project" },
@@ -162,13 +162,13 @@ async function inTemporaryDirectory(run) {
         },
     };
     await command.dispatchReview({ github, context, core: createCore() });
-    context.payload.comment.body = "please @review thorough";
+    context.payload.comment.body = "  @Review \n";
     await command.dispatchReview({ github, context, core: createCore() });
+    // Mentions inside prose are not commands.
+    context.payload.comment.body = "please do not run @review on this PR";
+    await command.dispatchReview({ github, context, core: createCore() });
+    assert.equal(dispatches.length, 2);
     assert.deepEqual(dispatches[0].inputs, { pr_number: "42" });
-    assert.deepEqual(dispatches[1].inputs, {
-        pr_number: "42",
-        review_level: "thorough",
-    });
 });
 (0, node_test_1.test)("reply validation rejects untrusted authors and uses the live PR head", async () => {
     // The event payload carries a stale head; the API returns the current one.
@@ -665,6 +665,80 @@ async function inTemporaryDirectory(run) {
         assert.equal(noRetry.outputs.retry, "false");
     });
 });
+(0, node_test_1.test)("reply reruns still resolve and dispatch when the reply was already posted", async () => {
+    const replies = [];
+    const resolved = [];
+    const dispatches = [];
+    // Stateful mock: a concurrent reply run resolves thread-2 the moment this
+    // run resolves thread-1. The final-review decision must come from a fetch
+    // taken after our own resolve, or neither run would dispatch.
+    const state = new Map([
+        ["thread-1", { rootId: 7, isResolved: false }],
+        ["thread-2", { rootId: 9, isResolved: false }],
+    ]);
+    const github = {
+        rest: {
+            pulls: {
+                createReplyForReviewComment: async (payload) => replies.push(payload),
+            },
+            actions: {
+                createWorkflowDispatch: async (payload) => dispatches.push(payload),
+            },
+        },
+        graphql: async (query, variables) => {
+            if (query.includes("resolveReviewThread")) {
+                resolved.push(variables.threadId);
+                for (const thread of state.values())
+                    thread.isResolved = true;
+                return {};
+            }
+            return {
+                repository: {
+                    pullRequest: {
+                        reviewThreads: {
+                            nodes: [...state].map(([id, thread]) => ({
+                                id,
+                                isResolved: thread.isResolved,
+                                comments: {
+                                    nodes: [{ databaseId: thread.rootId, author: { login: "m6d-review" } }],
+                                },
+                            })),
+                            pageInfo: { hasNextPage: false, endCursor: null },
+                        },
+                    },
+                },
+            };
+        },
+    };
+    const context = {
+        repo: { owner: "acme", repo: "project" },
+        payload: {
+            pull_request: pullRequest(),
+            comment: { id: 8, user: { login: "developer" }, in_reply_to_id: 7 },
+            repository: { default_branch: "main" },
+        },
+    };
+    await inTemporaryDirectory(async (directory) => {
+        fs.mkdirSync(path.join(directory, ".codex"));
+        fs.writeFileSync(path.join(directory, ".codex/reply.json"), JSON.stringify({
+            evaluation_completed: true,
+            should_respond: true,
+            assessment: "RESOLVED",
+            reply_markdown: "Confirmed, resolving.",
+            reason: null,
+        }));
+        await withEnvironment({
+            M6D_ROOT_COMMENT_ID: "7",
+            M6D_BOT_LOGIN: "m6d-review",
+            M6D_REVIEW_WORKFLOW: "review.yml",
+            M6D_ALREADY_REPLIED: "true",
+        }, () => reply.post({ github, context, core: createCore() }));
+    });
+    assert.deepEqual(replies, []);
+    assert.deepEqual(resolved, ["thread-1"]);
+    assert.equal(dispatches.length, 1);
+    assert.deepEqual(dispatches[0].inputs, { pr_number: "42" });
+});
 (0, node_test_1.test)("status comment is left alone once the PR head has moved", async () => {
     const writes = [];
     let headSha = "head-sha";
@@ -760,78 +834,4 @@ async function inTemporaryDirectory(run) {
         assert.deepEqual(fs.readdirSync(path.join(directory, ".codex/finders")), ["review.md"]);
         assert.equal(fs.existsSync(path.join(directory, ".codex/candidates")), false);
     });
-});
-(0, node_test_1.test)("reply reruns still resolve and dispatch when the reply was already posted", async () => {
-    const replies = [];
-    const resolved = [];
-    const dispatches = [];
-    // Stateful mock: a concurrent reply run resolves thread-2 the moment this
-    // run resolves thread-1. The final-review decision must come from a fetch
-    // taken after our own resolve, or neither run would dispatch.
-    const state = new Map([
-        ["thread-1", { rootId: 7, isResolved: false }],
-        ["thread-2", { rootId: 9, isResolved: false }],
-    ]);
-    const github = {
-        rest: {
-            pulls: {
-                createReplyForReviewComment: async (payload) => replies.push(payload),
-            },
-            actions: {
-                createWorkflowDispatch: async (payload) => dispatches.push(payload),
-            },
-        },
-        graphql: async (query, variables) => {
-            if (query.includes("resolveReviewThread")) {
-                resolved.push(variables.threadId);
-                for (const thread of state.values())
-                    thread.isResolved = true;
-                return {};
-            }
-            return {
-                repository: {
-                    pullRequest: {
-                        reviewThreads: {
-                            nodes: [...state].map(([id, thread]) => ({
-                                id,
-                                isResolved: thread.isResolved,
-                                comments: {
-                                    nodes: [{ databaseId: thread.rootId, author: { login: "m6d-review" } }],
-                                },
-                            })),
-                            pageInfo: { hasNextPage: false, endCursor: null },
-                        },
-                    },
-                },
-            };
-        },
-    };
-    const context = {
-        repo: { owner: "acme", repo: "project" },
-        payload: {
-            pull_request: pullRequest(),
-            comment: { id: 8, user: { login: "developer" }, in_reply_to_id: 7 },
-            repository: { default_branch: "main" },
-        },
-    };
-    await inTemporaryDirectory(async (directory) => {
-        fs.mkdirSync(path.join(directory, ".codex"));
-        fs.writeFileSync(path.join(directory, ".codex/reply.json"), JSON.stringify({
-            evaluation_completed: true,
-            should_respond: true,
-            assessment: "RESOLVED",
-            reply_markdown: "Confirmed, resolving.",
-            reason: null,
-        }));
-        await withEnvironment({
-            M6D_ROOT_COMMENT_ID: "7",
-            M6D_BOT_LOGIN: "m6d-review",
-            M6D_REVIEW_WORKFLOW: "review.yml",
-            M6D_ALREADY_REPLIED: "true",
-        }, () => reply.post({ github, context, core: createCore() }));
-    });
-    assert.deepEqual(replies, []);
-    assert.deepEqual(resolved, ["thread-1"]);
-    assert.equal(dispatches.length, 1);
-    assert.deepEqual(dispatches[0].inputs, { pr_number: "42" });
 });
