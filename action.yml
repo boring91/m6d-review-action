@@ -6,7 +6,7 @@ inputs:
     description: "Event handler to run: review, command, or reply."
     required: true
   review-level:
-    description: "Review depth: standard or thorough."
+    description: "Review depth: standard runs one finder pass, thorough runs four focused finders in parallel. Both are followed by a verifier."
     required: false
     default: standard
   app-id:
@@ -117,20 +117,49 @@ runs:
       id: codex-review
       if: inputs.mode == 'review'
       shell: bash
-      env:
-        M6D_REVIEW_LEVEL: ${{ inputs.review-level }}
       run: |
         set -euo pipefail
-        review_args=(--ephemeral)
-        if [[ "$M6D_REVIEW_LEVEL" == "thorough" ]]; then
-          review_args=(
-            -c 'agents.enabled=true'
-            -c 'agents.max_concurrent_threads_per_session=4'
-            -c 'agents.default_subagent_model="gpt-5.6-sol"'
-          )
-        fi
-        codex exec --model gpt-5.6-sol -c 'model_reasoning_effort="xhigh"' "${review_args[@]}" -c 'approval_policy="never"' -c 'sandbox_mode="danger-full-access"' --output-schema .codex/review-schema.json -o .codex/review.json - < .codex/review-prompt.md
-        test -s .codex/review.json
+        codex_review() {
+          codex exec --model gpt-5.6-sol -c 'model_reasoning_effort="xhigh"' --ephemeral -c 'approval_policy="never"' -c 'sandbox_mode="danger-full-access"' --output-schema "$1" -o "$2" - < "$3"
+          test -s "$2"
+        }
+        # Finder prompts were written by prepare: one for standard, four for
+        # thorough. They run in parallel; any finder failure fails the review.
+        mkdir -p .codex/candidates .codex/logs
+        pids=()
+        for prompt in .codex/finders/*.md; do
+          name="$(basename "$prompt" .md)"
+          codex_review .codex/candidates-schema.json ".codex/candidates/$name.json" "$prompt" > ".codex/logs/$name.log" 2>&1 &
+          pids+=($!)
+        done
+        status=0
+        for pid in "${pids[@]}"; do wait "$pid" || status=1; done
+        cat .codex/logs/*.log
+        test "$status" -eq 0
+        # The verifier confirms or drops every candidate and writes the final review.
+        codex_review .codex/review-schema.json .codex/review.json .codex/review-prompt.md
+
+    - name: Check thread decisions
+      id: check-threads
+      if: inputs.mode == 'review' && steps.codex-review.outcome == 'success'
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+      env:
+        M6D_ACTION_PATH: ${{ github.action_path }}
+        M6D_BASE_SHA: ${{ steps.pr.outputs.base_sha }}
+        M6D_HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+      with:
+        github-token: ${{ steps.review-app-token.outputs.token }}
+        script: |
+          const review = require(`${process.env.M6D_ACTION_PATH}/dist/review.js`);
+          await review.checkThreads({ github, context, core });
+
+    - name: Retry skipped thread decisions
+      if: inputs.mode == 'review' && steps.check-threads.outputs.retry == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        codex exec --model gpt-5.6-sol -c 'model_reasoning_effort="xhigh"' --ephemeral -c 'approval_policy="never"' -c 'sandbox_mode="danger-full-access"' --output-schema .codex/threads-schema.json -o .codex/threads.json - < .codex/threads-prompt.md
+        test -s .codex/threads.json
 
     - name: Submit pull-request review
       id: submit-review
@@ -148,7 +177,7 @@ runs:
           await review.submit({ github, context, core });
 
     - name: Mark review as finished
-      if: inputs.mode == 'review' && always() && steps.review-app-token.outcome == 'success'
+      if: inputs.mode == 'review' && always() && !cancelled() && steps.review-app-token.outcome == 'success'
       uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
       env:
         M6D_ACTION_PATH: ${{ github.action_path }}
