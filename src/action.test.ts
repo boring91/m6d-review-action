@@ -116,6 +116,7 @@ test("packaged prompts load independently of the working directory", async () =>
     assert.match(readPrompt("verify.md"), /NOT_APPLICABLE/);
     assert.match(readPrompt("threads.md"), /\{\{repository\}\}/);
     assert.match(readPrompt("reply.md"), /\{\{repository\}\}/);
+    assert.match(readPrompt("reply.md"), /missing file or line is not a reason/);
   });
 });
 
@@ -169,7 +170,12 @@ test("review commands dispatch standard and thorough levels", async () => {
     review_level: "thorough",
   });
 });
-test("reply validation rejects untrusted authors", async () => {
+test("reply validation rejects untrusted authors and uses the live PR head", async () => {
+  // The event payload carries a stale head; the API returns the current one.
+  const current = { ...pullRequest(), head: { ...pullRequest().head, sha: "newer-sha" } };
+  const github = {
+    rest: { pulls: { get: async () => ({ data: current }) } },
+  } as unknown as GitHub;
   const context: Context = {
     repo: { owner: "acme", repo: "project" },
     payload: {
@@ -185,21 +191,49 @@ test("reply validation rejects untrusted authors", async () => {
 
   await withEnvironment({ M6D_BASE_BRANCH: "main" }, async () => {
     const untrusted = createCore();
-    await reply.validate({ context, core: untrusted });
+    await reply.validate({ github, context, core: untrusted });
     assert.equal(untrusted.outputs.skip, "true");
 
     context.payload.comment!.author_association = "MEMBER";
     const trusted = createCore();
-    await reply.validate({ context, core: trusted });
+    await reply.validate({ github, context, core: trusted });
     assert.equal(trusted.outputs.skip, "false");
-    assert.equal(trusted.outputs.head_sha, "head-sha");
+    assert.equal(trusted.outputs.head_sha, "newer-sha");
 
-    context.payload.pull_request!.state = "closed";
+    current.state = "closed";
     const closed = createCore();
-    await reply.validate({ context, core: closed });
+    await reply.validate({ github, context, core: closed });
     assert.equal(closed.outputs.skip, "true");
   });
 });
+
+test("reply post fails loudly when Codex could not evaluate", async () => {
+  const context: Context = {
+    repo: { owner: "acme", repo: "project" },
+    payload: {
+      pull_request: pullRequest(),
+      comment: { id: 8, user: { login: "developer" }, in_reply_to_id: 7 },
+    },
+  };
+  await inTemporaryDirectory(async (directory) => {
+    fs.mkdirSync(path.join(directory, ".codex"));
+    fs.writeFileSync(
+      path.join(directory, ".codex/reply.json"),
+      JSON.stringify({
+        evaluation_completed: false,
+        should_respond: false,
+        assessment: "STILL_OPEN",
+        reply_markdown: "",
+        reason: "diff command failed",
+      }),
+    );
+    await assert.rejects(
+      reply.post({ github: {} as GitHub, context, core: createCore() }),
+      /could not evaluate the reply: diff command failed/,
+    );
+  });
+});
+
 test("status updates only the current GitHub App comment", async () => {
   const listComments = () => {};
   const listReviews = () => {};
@@ -831,4 +865,88 @@ test("prepare starts from a clean .codex directory", async () => {
     assert.deepEqual(fs.readdirSync(path.join(directory, ".codex/finders")), ["review.md"]);
     assert.equal(fs.existsSync(path.join(directory, ".codex/candidates")), false);
   });
+});
+
+test("reply reruns still resolve and dispatch when the reply was already posted", async () => {
+  const replies: AnyRecord[] = [];
+  const resolved: string[] = [];
+  const dispatches: AnyRecord[] = [];
+  // Stateful mock: a concurrent reply run resolves thread-2 the moment this
+  // run resolves thread-1. The final-review decision must come from a fetch
+  // taken after our own resolve, or neither run would dispatch.
+  const state = new Map([
+    ["thread-1", { rootId: 7, isResolved: false }],
+    ["thread-2", { rootId: 9, isResolved: false }],
+  ]);
+  const github = {
+    rest: {
+      pulls: {
+        createReplyForReviewComment: async (payload: AnyRecord) =>
+          replies.push(payload),
+      },
+      actions: {
+        createWorkflowDispatch: async (payload: AnyRecord) =>
+          dispatches.push(payload),
+      },
+    },
+    graphql: async (query: string, variables: AnyRecord) => {
+      if (query.includes("resolveReviewThread")) {
+        resolved.push(variables.threadId);
+        for (const thread of state.values()) thread.isResolved = true;
+        return {};
+      }
+      return {
+        repository: {
+          pullRequest: {
+            reviewThreads: {
+              nodes: [...state].map(([id, thread]) => ({
+                id,
+                isResolved: thread.isResolved,
+                comments: {
+                  nodes: [{ databaseId: thread.rootId, author: { login: "m6d-review" } }],
+                },
+              })),
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        },
+      };
+    },
+  } as unknown as GitHub;
+  const context: Context = {
+    repo: { owner: "acme", repo: "project" },
+    payload: {
+      pull_request: pullRequest(),
+      comment: { id: 8, user: { login: "developer" }, in_reply_to_id: 7 },
+      repository: { default_branch: "main" },
+    },
+  };
+
+  await inTemporaryDirectory(async (directory) => {
+    fs.mkdirSync(path.join(directory, ".codex"));
+    fs.writeFileSync(
+      path.join(directory, ".codex/reply.json"),
+      JSON.stringify({
+        evaluation_completed: true,
+        should_respond: true,
+        assessment: "RESOLVED",
+        reply_markdown: "Confirmed, resolving.",
+        reason: null,
+      }),
+    );
+    await withEnvironment(
+      {
+        M6D_ROOT_COMMENT_ID: "7",
+        M6D_BOT_LOGIN: "m6d-review",
+        M6D_REVIEW_WORKFLOW: "review.yml",
+        M6D_ALREADY_REPLIED: "true",
+      },
+      () => reply.post({ github, context, core: createCore() }),
+    );
+  });
+
+  assert.deepEqual(replies, []);
+  assert.deepEqual(resolved, ["thread-1"]);
+  assert.equal(dispatches.length, 1);
+  assert.deepEqual(dispatches[0].inputs, { pr_number: "42" });
 });

@@ -276,6 +276,8 @@ runs:
       uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
       env:
         M6D_ACTION_PATH: ${{ github.action_path }}
+        M6D_BASE_SHA: ${{ steps.reply-context.outputs.base_sha }}
+        M6D_HEAD_SHA: ${{ steps.reply-context.outputs.head_sha }}
       with:
         github-token: ${{ steps.reply-app-token.outputs.token }}
         script: |
@@ -297,6 +299,7 @@ runs:
       env:
         M6D_ACTION_PATH: ${{ github.action_path }}
         M6D_ROOT_COMMENT_ID: ${{ steps.prepare-reply.outputs.root_comment_id }}
+        M6D_ALREADY_REPLIED: ${{ steps.prepare-reply.outputs.already_replied }}
         M6D_BOT_LOGIN: ${{ steps.prepare-reply.outputs.bot_login }}
         M6D_REVIEW_WORKFLOW: ${{ inputs.review-workflow }}
       with:

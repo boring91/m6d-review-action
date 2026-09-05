@@ -38,12 +38,20 @@ exports.prepare = prepare;
 exports.post = post;
 const fs = __importStar(require("node:fs"));
 const helpers_js_1 = require("./helpers.js");
-async function validate({ context, core, }) {
-    const pr = context.payload.pull_request;
+async function validate({ github, context, core, }) {
     const comment = context.payload.comment;
     const expectedRepo = `${context.repo.owner}/${context.repo.repo}`;
     const expectedBase = process.env.M6D_BASE_BRANCH;
     const problems = [];
+    // The event payload is a snapshot from when the comment was written. Pushes
+    // that landed since then would otherwise be evaluated against a stale head.
+    const number = context.payload.pull_request?.number;
+    const pr = number
+        ? (await github.rest.pulls.get({
+            ...context.repo,
+            pull_number: number,
+        })).data
+        : undefined;
     if (pr?.state !== "open")
         problems.push(`state is ${pr?.state}`);
     if (pr?.draft)
@@ -114,11 +122,16 @@ async function prepare({ github, context, core, }) {
         .filter((comment) => comment.id === rootId || comment.in_reply_to_id === rootId)
         .sort((left, right) => new Date(left.created_at).getTime() -
         new Date(right.created_at).getTime());
+    // A marker only means the reply text was posted. Resolution and the final
+    // dispatch may still be pending from a failed earlier run, so keep going and
+    // let `post` skip just the duplicate reply.
     const marker = `<!-- codex-reply:${triggerComment.id} -->`;
     const alreadyReplied = thread.some((comment) => (0, helpers_js_1.normalizeBotLogin)(comment.user.login) === botLogin &&
         (comment.body || "").includes(marker));
-    if (alreadyReplied)
-        return skip("Already replied to this comment; skipping.");
+    if (alreadyReplied) {
+        core.info("Reply already posted on an earlier run; re-evaluating without reposting.");
+    }
+    core.setOutput("already_replied", alreadyReplied ? "true" : "false");
     const path = root.path ?? triggerComment.path ?? "unknown";
     const line = triggerComment.line ??
         triggerComment.original_line ??
@@ -126,13 +139,16 @@ async function prepare({ github, context, core, }) {
         root.original_line ??
         "unknown";
     const diffHunk = triggerComment.diff_hunk || root.diff_hunk || "";
+    // SHAs come from the refreshed PR in `validate`, not the event snapshot.
+    const headSha = process.env.M6D_HEAD_SHA;
+    const baseSha = process.env.M6D_BASE_SHA;
     const lines = [
         "# Review Thread Reply Evaluation",
         "",
         `Repository: ${owner}/${repo}`,
         `Pull request: #${pullNumber} ${pr.title}`,
-        `Head SHA (current checked-out code): ${pr.head.sha}`,
-        `Base: ${pr.base.ref} (${pr.base.sha})`,
+        `Head SHA (current checked-out code): ${headSha}`,
+        `Base: ${pr.base.ref} (${baseSha})`,
         `File: ${path}`,
         `Line: ${line}`,
         "",
@@ -175,6 +191,8 @@ async function prepare({ github, context, core, }) {
         },
     };
     const prompt = (0, helpers_js_1.readPrompt)("reply.md").replace("{{repository}}", `${owner}/${repo}`);
+    // The checkout is untrusted PR content; start from an empty .codex.
+    fs.rmSync(".codex", { recursive: true, force: true });
     fs.mkdirSync(".codex", { recursive: true });
     fs.writeFileSync(".codex/reply-context.md", `${lines.join("\n")}\n`, "utf8");
     fs.writeFileSync(".codex/reply-schema.json", `${JSON.stringify(schema, null, 2)}\n`, "utf8");
@@ -184,9 +202,10 @@ async function prepare({ github, context, core, }) {
         "Runtime target:",
         `- File: ${path}`,
         `- Line: ${line}`,
-        `- Base SHA: ${pr.base.sha}`,
-        `- Head SHA: ${pr.head.sha}`,
-        `- Compare with: git diff ${pr.base.sha}...${pr.head.sha} -- ${path}`,
+        `- Base SHA: ${baseSha}`,
+        `- Head SHA: ${headSha}`,
+        `- Full PR diff: git diff ${baseSha}...${headSha}`,
+        `- File diff: git diff ${baseSha}...${headSha} -- ${path}`,
         "- Context file: .codex/reply-context.md",
         "",
     ].join("\n"), "utf8");
@@ -207,15 +226,16 @@ async function post({ github, context, core, }) {
     const triggerId = triggerComment.id;
     const result = (0, helpers_js_1.parseJson)(fs.readFileSync(".codex/reply.json", "utf8").trim(), "Codex reply output");
     if (result.evaluation_completed !== true) {
-        core.warning(`Evaluation not completed: ${result.reason || "unknown reason"}`);
-        return;
+        throw new Error(`Codex could not evaluate the reply: ${result.reason || "unknown reason"}`);
     }
     const assessment = result.assessment;
     const agreed = assessment === "RESOLVED";
     const text = String(result.reply_markdown || "").trim();
-    const reply = text ||
-        (agreed ? "Agreed — this looks addressed. Resolving this thread." : "");
-    if ((result.should_respond === true || agreed) && reply) {
+    const reply = text || (agreed ? "Agreed, this looks addressed. Resolving this thread." : "");
+    if (process.env.M6D_ALREADY_REPLIED === "true") {
+        core.info("Reply already posted on an earlier run; not reposting.");
+    }
+    else if ((result.should_respond === true || agreed) && reply) {
         await github.rest.pulls.createReplyForReviewComment({
             owner,
             repo,
@@ -232,39 +252,42 @@ async function post({ github, context, core, }) {
         core.notice(`Assessment ${assessment}; thread left open.`);
         return;
     }
-    const query = `
-    query($owner: String!, $repo: String!, $num: Int!, $cursor: String) {
-      repository(owner: $owner, name: $repo) {
-        pullRequest(number: $num) {
-          reviewThreads(first: 100, after: $cursor) {
-            nodes {
-              id
-              isResolved
-              comments(first: 1) {
-                nodes { databaseId author { login } }
+    const listThreads = async () => {
+        const query = `
+      query($owner: String!, $repo: String!, $num: Int!, $cursor: String) {
+        repository(owner: $owner, name: $repo) {
+          pullRequest(number: $num) {
+            reviewThreads(first: 100, after: $cursor) {
+              nodes {
+                id
+                isResolved
+                comments(first: 1) {
+                  nodes { databaseId author { login } }
+                }
               }
+              pageInfo { hasNextPage endCursor }
             }
-            pageInfo { hasNextPage endCursor }
           }
         }
-      }
-    }`;
-    const threads = [];
-    let cursor = null;
-    do {
-        const result = await github.graphql(query, {
-            owner,
-            repo,
-            num: pullNumber,
-            cursor,
-        });
-        const connection = result.repository.pullRequest.reviewThreads;
-        threads.push(...connection.nodes);
-        cursor = connection.pageInfo.hasNextPage
-            ? connection.pageInfo.endCursor
-            : null;
-    } while (cursor);
-    const target = threads.find((thread) => thread.comments.nodes[0]?.databaseId === rootId);
+      }`;
+        const threads = [];
+        let cursor = null;
+        do {
+            const result = await github.graphql(query, {
+                owner,
+                repo,
+                num: pullNumber,
+                cursor,
+            });
+            const connection = result.repository.pullRequest.reviewThreads;
+            threads.push(...connection.nodes);
+            cursor = connection.pageInfo.hasNextPage
+                ? connection.pageInfo.endCursor
+                : null;
+        } while (cursor);
+        return threads;
+    };
+    const target = (await listThreads()).find((thread) => thread.comments.nodes[0]?.databaseId === rootId);
     if (!target) {
         core.warning(`Could not locate review thread for comment ${rootId}; skipping resolve.`);
         return;
@@ -277,8 +300,10 @@ async function post({ github, context, core, }) {
         core.warning("Bot identity unknown; skipping the final-review check.");
         return;
     }
-    const remaining = threads.filter((thread) => thread.id !== target.id &&
-        !thread.isResolved &&
+    // Re-fetch after resolving. Concurrent reply runs each resolve their own
+    // thread, so a snapshot taken before the mutation would let every run see
+    // another thread still open and nobody would dispatch the final review.
+    const remaining = (await listThreads()).filter((thread) => !thread.isResolved &&
         (0, helpers_js_1.normalizeBotLogin)(thread.comments.nodes[0]?.author?.login) === botLogin);
     core.info(`${remaining.length} unresolved ${botLogin} thread(s) remain.`);
     if (remaining.length > 0)
