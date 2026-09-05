@@ -120,7 +120,11 @@ async function inTemporaryDirectory(run) {
 (0, node_test_1.test)("packaged prompts load independently of the working directory", async () => {
     await inTemporaryDirectory(() => {
         assert.match((0, helpers_js_1.readPrompt)("finder.md"), /\{\{dimension\}\}/);
+        assert.match((0, helpers_js_1.readPrompt)("finder.md"), /report the pattern once/);
+        assert.match((0, helpers_js_1.readPrompt)("finder.md"), /Considered and dropped/);
         assert.match((0, helpers_js_1.readPrompt)("verify.md"), /\{\{repository\}\}/);
+        assert.match((0, helpers_js_1.readPrompt)("verify.md"), /Earlier decisions on this PR are precedent/);
+        assert.match((0, helpers_js_1.readPrompt)("verify.md"), /every affected `file:line`/);
         assert.match((0, helpers_js_1.readPrompt)("verify.md"), /never a finding/i);
         assert.match((0, helpers_js_1.readPrompt)("verify.md"), /NOT_APPLICABLE/);
         assert.match((0, helpers_js_1.readPrompt)("threads.md"), /\{\{repository\}\}/);
