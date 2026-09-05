@@ -111,7 +111,11 @@ test("helpers parse output and enforce trusted associations", () => {
 test("packaged prompts load independently of the working directory", async () => {
   await inTemporaryDirectory(() => {
     assert.match(readPrompt("finder.md"), /\{\{dimension\}\}/);
+    assert.match(readPrompt("finder.md"), /report the pattern once/);
+    assert.match(readPrompt("finder.md"), /Considered and dropped/);
     assert.match(readPrompt("verify.md"), /\{\{repository\}\}/);
+    assert.match(readPrompt("verify.md"), /Earlier decisions on this PR are precedent/);
+    assert.match(readPrompt("verify.md"), /every affected `file:line`/);
     assert.match(readPrompt("verify.md"), /never a finding/i);
     assert.match(readPrompt("verify.md"), /NOT_APPLICABLE/);
     assert.match(readPrompt("threads.md"), /\{\{repository\}\}/);

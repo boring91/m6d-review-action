@@ -6,6 +6,10 @@ Candidate findings from focused finder passes are in `.codex/candidates/*.json`.
 
 Verify every candidate against the checked-out code and the diff between the base and head SHAs. Merge duplicates. Confirm a candidate only when you can point at the exact code that proves it is a real problem introduced by this PR; otherwise drop it. You may lower a severity when the evidence does not support it, but do not raise one without evidence. Add a finding the finders missed only when you can prove it the same way. For each unresolved prior review-bot thread, decide whether it is fixed, no longer applicable, or still open.
 
+Earlier decisions on this PR are precedent. Prior review bodies in `.codex/pr-context.md` include "Considered and dropped" lists and resolved threads may contain developer pushback the reviewer accepted. Drop any candidate that matches one of those unless the code it concerns changed in this push in a way that undoes the earlier reason; when you do keep one, state in its body what changed. Do not re-open a decision the developer already argued and won.
+
+When a confirmed finding is one instance of a pattern that recurs elsewhere in the diff, post a single finding that lists every affected `file:line` rather than one per location or one location per round.
+
 Return JSON only, matching `.codex/review-schema.json`:
 
 - `event`: use `REQUEST_CHANGES` when any confirmed `CRITICAL`, `HIGH`, `MEDIUM`, or `LOW` finding remains. Use `APPROVE` when only `INFO` notes or nothing remain.
