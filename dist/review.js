@@ -35,6 +35,9 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.resolve = resolve;
 exports.prepare = prepare;
+exports.checkThreads = checkThreads;
+exports.parseDiffLines = parseDiffLines;
+exports.inlineComments = inlineComments;
 exports.submit = submit;
 exports.finish = finish;
 const fs = __importStar(require("node:fs"));
@@ -47,6 +50,7 @@ const SEVERITY = {
     LOW: "🔵 LOW",
     INFO: "🟢 INFO",
 };
+const OPEN_THREADS_FILE = ".codex/open-threads.json";
 async function resolve({ github, context, core, }) {
     const { owner, repo } = context.repo;
     const pullRequest = context.payload.pull_request ??
@@ -78,7 +82,87 @@ async function resolve({ github, context, core, }) {
     core.setOutput("base_sha", pullRequest.base.sha);
     core.setOutput("title", pullRequest.title ?? "");
 }
-function reviewSchema() {
+// The verifier confirms or drops every candidate before anything reaches the
+// PR. A thorough review gives each dimension its own finder session; a
+// standard review covers all four in one.
+const DIMENSIONS = {
+    correctness: "Correctness and reliability: broken workflows, regressions, edge cases, state transitions, concurrency, error handling, data integrity, and compatibility.",
+    security: "Security and trust boundaries: authentication, authorization, ownership and tenant isolation, input validation, injection, data exposure, secrets, unsafe configuration, and dependency risks.",
+    minimality: "Minimality and reuse: existing code that can be reused, duplicated logic, unnecessary dependencies or abstractions, scope creep, and materially smaller implementations. Optimize for fewer concepts, branches, dependencies, and duplicated paths rather than raw line count.",
+    taste: "Taste and consistency: naming, readability, language idioms, API shape, error-handling conventions, code smells, UI consistency, and alignment with established repository patterns.",
+};
+function finders(level) {
+    if (level === "thorough")
+        return DIMENSIONS;
+    return {
+        review: Object.values(DIMENSIONS)
+            .map((dimension) => `- ${dimension}`)
+            .join("\n"),
+    };
+}
+// Shared by finder candidates and final inline comments.
+const commentFields = {
+    path: { type: "string", minLength: 1 },
+    line: { type: "integer", minimum: 1 },
+    side: { type: "string", enum: ["RIGHT", "LEFT"] },
+    start_line: { type: ["integer", "null"], minimum: 1 },
+    start_side: { type: ["string", "null"], enum: ["RIGHT", "LEFT", null] },
+    severity: { type: "string", enum: Object.keys(SEVERITY) },
+    body: { type: "string", minLength: 1 },
+};
+function candidatesSchema() {
+    return {
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        type: "object",
+        additionalProperties: false,
+        required: ["candidates"],
+        properties: {
+            candidates: {
+                type: "array",
+                maxItems: 50,
+                items: {
+                    type: "object",
+                    additionalProperties: false,
+                    required: ["title", ...Object.keys(commentFields), "evidence"],
+                    properties: {
+                        title: { type: "string", minLength: 1 },
+                        ...commentFields,
+                        evidence: { type: "array", items: { type: "string", minLength: 1 } },
+                    },
+                },
+            },
+        },
+    };
+}
+// The thread IDs are baked into the schema so structured output forces one
+// decision per open thread instead of letting the model skip some.
+function threadsSchema(threadIds) {
+    return {
+        type: "array",
+        minItems: threadIds.length,
+        maxItems: Math.max(threadIds.length, 1),
+        items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["thread_id", "status", "reply"],
+            properties: {
+                thread_id: { type: "string", enum: threadIds.length ? threadIds : [""] },
+                status: { type: "string", enum: ["FIXED", "NOT_APPLICABLE", "OPEN"] },
+                reply: { type: ["string", "null"] },
+            },
+        },
+    };
+}
+function threadsRetrySchema(threadIds) {
+    return {
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        type: "object",
+        additionalProperties: false,
+        required: ["threads"],
+        properties: { threads: threadsSchema(threadIds) },
+    };
+}
+function reviewSchema(threadIds) {
     return {
         $schema: "https://json-schema.org/draft/2020-12/schema",
         type: "object",
@@ -91,8 +175,8 @@ function reviewSchema() {
             "failure_reason",
             "body",
             "comments",
-            "resolved_thread_ids",
-            "dismissed_threads",
+            "dropped",
+            "threads",
         ],
         properties: {
             event: { type: "string", enum: ["APPROVE", "REQUEST_CHANGES"] },
@@ -107,55 +191,31 @@ function reviewSchema() {
                 items: {
                     type: "object",
                     additionalProperties: false,
-                    required: [
-                        "path",
-                        "line",
-                        "side",
-                        "start_line",
-                        "start_side",
-                        "severity",
-                        "body",
-                    ],
-                    properties: {
-                        path: { type: "string", minLength: 1 },
-                        line: { type: "integer", minimum: 1 },
-                        side: { type: "string", enum: ["RIGHT", "LEFT"] },
-                        start_line: { type: ["integer", "null"], minimum: 1 },
-                        start_side: {
-                            type: ["string", "null"],
-                            enum: ["RIGHT", "LEFT", null],
-                        },
-                        severity: { type: "string", enum: Object.keys(SEVERITY) },
-                        body: { type: "string", minLength: 1 },
-                    },
+                    required: Object.keys(commentFields),
+                    properties: commentFields,
                 },
             },
-            resolved_thread_ids: {
+            dropped: {
                 type: "array",
-                maxItems: 50,
-                items: { type: "string", minLength: 1 },
-            },
-            dismissed_threads: {
-                type: "array",
-                maxItems: 50,
+                maxItems: 200,
                 items: {
                     type: "object",
                     additionalProperties: false,
-                    required: ["thread_id", "reason"],
+                    required: ["title", "reason"],
                     properties: {
-                        thread_id: { type: "string", minLength: 1 },
+                        title: { type: "string", minLength: 1 },
                         reason: { type: "string", minLength: 1 },
                     },
                 },
             },
+            threads: threadsSchema(threadIds),
         },
     };
 }
-function reviewPrompt(repository, thorough) {
-    const prompt = (0, helpers_js_1.readPrompt)("review.md").replace("{{repository}}", repository);
-    return thorough
-        ? `${prompt.trimEnd()}\n\n${(0, helpers_js_1.readPrompt)("review-thorough.md")}`
-        : prompt;
+function finderPrompt(repository, dimension) {
+    return (0, helpers_js_1.readPrompt)("finder.md")
+        .replace("{{repository}}", repository)
+        .replace("{{dimension}}", dimension);
 }
 async function listThreads(github, owner, repo, pullNumber) {
     const query = `
@@ -173,23 +233,17 @@ async function listThreads(github, owner, repo, pullNumber) {
               originalLine
               originalStartLine
               diffSide
-              comments(first: 20) {
-                nodes {
-                  databaseId
-                  author { login }
-                  body
-                  createdAt
-                  path
-                  line
-                  originalLine
-                }
+              comments(first: 100) {
+                nodes { ...commentFields }
+                pageInfo { hasNextPage endCursor }
               }
             }
             pageInfo { hasNextPage endCursor }
           }
         }
       }
-    }`;
+    }
+    ${COMMENT_FIELDS}`;
     const nodes = [];
     let cursor = null;
     do {
@@ -200,11 +254,42 @@ async function listThreads(github, owner, repo, pullNumber) {
             cursor,
         });
         const threads = result.repository.pullRequest.reviewThreads;
-        nodes.push(...threads.nodes);
+        for (const thread of threads.nodes) {
+            // A thread's own comments page too; a long back-and-forth must not
+            // hide the reply that explains why a finding was wrong.
+            let page = thread.comments;
+            while (page.pageInfo?.hasNextPage) {
+                page = await github
+                    .graphql(`query($id: ID!, $cursor: String) {
+               node(id: $id) {
+                 ... on PullRequestReviewThread {
+                   comments(first: 100, after: $cursor) {
+                     nodes { ...commentFields }
+                     pageInfo { hasNextPage endCursor }
+                   }
+                 }
+               }
+             }
+             ${COMMENT_FIELDS}`, { id: thread.id, cursor: page.pageInfo.endCursor })
+                    .then((result) => result.node.comments);
+                thread.comments.nodes.push(...page.nodes);
+            }
+            nodes.push(thread);
+        }
         cursor = threads.pageInfo.hasNextPage ? threads.pageInfo.endCursor : null;
     } while (cursor);
     return nodes;
 }
+const COMMENT_FIELDS = `
+  fragment commentFields on PullRequestReviewComment {
+    databaseId
+    author { login }
+    body
+    createdAt
+    path
+    line
+    originalLine
+  }`;
 async function upsertStatus(github, owner, repo, pullNumber, body) {
     const appSlug = process.env.M6D_APP_SLUG;
     if (!appSlug)
@@ -320,11 +405,8 @@ async function prepare({ github, context, }) {
     for (const comment of recentComments) {
         contextLines.push(`### ${comment.user.login} at ${comment.created_at}`, "", (0, helpers_js_1.quote)(comment.body), "");
     }
-    fs.mkdirSync(".codex", { recursive: true });
-    fs.writeFileSync(".codex/pr-context.md", `${contextLines.join("\n")}\n`, "utf8");
-    fs.writeFileSync(".codex/review-schema.json", `${JSON.stringify(reviewSchema(), null, 2)}\n`, "utf8");
-    fs.writeFileSync(".codex/review-prompt.md", [
-        reviewPrompt(`${owner}/${repo}`, process.env.M6D_REVIEW_LEVEL === "thorough"),
+    const repository = `${owner}/${repo}`;
+    const target = [
         "",
         "Runtime review target:",
         `- PR title: ${process.env.M6D_PR_TITLE}`,
@@ -332,6 +414,46 @@ async function prepare({ github, context, }) {
         `- Base SHA: ${process.env.M6D_BASE_SHA}`,
         `- Head SHA: ${process.env.M6D_HEAD_SHA}`,
         `- Compare with: git diff ${process.env.M6D_BASE_SHA}...${process.env.M6D_HEAD_SHA}`,
+        "",
+    ].join("\n");
+    const appLogin = (0, helpers_js_1.normalizeBotLogin)(process.env.M6D_APP_SLUG);
+    const openThreadIds = threads
+        .filter((thread) => !thread.isResolved &&
+        (0, helpers_js_1.normalizeBotLogin)(thread.comments.nodes[0]?.author?.login) === appLogin)
+        .map((thread) => thread.id);
+    // The checkout is untrusted PR content. Start from an empty .codex so a PR
+    // cannot plant extra finder prompts, fake candidates, or symlinked logs.
+    fs.rmSync(".codex", { recursive: true, force: true });
+    fs.mkdirSync(".codex/finders", { recursive: true });
+    fs.writeFileSync(".codex/pr-context.md", `${contextLines.join("\n")}\n`, "utf8");
+    fs.writeFileSync(OPEN_THREADS_FILE, `${JSON.stringify(openThreadIds)}\n`, "utf8");
+    fs.writeFileSync(".codex/candidates-schema.json", `${JSON.stringify(candidatesSchema(), null, 2)}\n`, "utf8");
+    fs.writeFileSync(".codex/review-schema.json", `${JSON.stringify(reviewSchema(openThreadIds), null, 2)}\n`, "utf8");
+    for (const [key, dimension] of Object.entries(finders(process.env.M6D_REVIEW_LEVEL))) {
+        fs.writeFileSync(`.codex/finders/${key}.md`, `${finderPrompt(repository, dimension)}\n${target}`, "utf8");
+    }
+    fs.writeFileSync(".codex/review-prompt.md", `${(0, helpers_js_1.readPrompt)("verify.md").replace("{{repository}}", repository)}\n${target}`, "utf8");
+}
+// Runs after the verifier. If it skipped any open thread despite the schema,
+// write a retry prompt and schema covering only the missed IDs and signal the
+// workflow to run Codex once more. Missed threads after that stay OPEN.
+async function checkThreads({ context, core, }) {
+    const expected = JSON.parse(fs.readFileSync(OPEN_THREADS_FILE, "utf8"));
+    const review = (0, helpers_js_1.parseJson)(fs.readFileSync(".codex/review.json", "utf8").trim(), "Codex review output");
+    const decided = new Set((Array.isArray(review.threads) ? review.threads : []).map((entry) => entry.thread_id));
+    const missing = expected.filter((id) => !decided.has(id));
+    core.setOutput("retry", missing.length > 0 ? "true" : "false");
+    if (missing.length === 0)
+        return;
+    core.warning(`Verifier skipped ${missing.length} open thread(s); retrying once for: ${missing.join(", ")}`);
+    fs.writeFileSync(".codex/threads-schema.json", `${JSON.stringify(threadsRetrySchema(missing), null, 2)}\n`, "utf8");
+    fs.writeFileSync(".codex/threads-prompt.md", [
+        (0, helpers_js_1.readPrompt)("threads.md").replace("{{repository}}", `${context.repo.owner}/${context.repo.repo}`),
+        "",
+        "Threads to classify:",
+        ...missing.map((id) => `- ${id}`),
+        "",
+        `Compare with: git diff ${process.env.M6D_BASE_SHA}...${process.env.M6D_HEAD_SHA}`,
         "",
     ].join("\n"), "utf8");
 }
@@ -348,7 +470,56 @@ function commentBody(comment) {
     const body = (0, helpers_js_1.truncate)(comment.body, 4000);
     return body ? (body.startsWith(label) ? body : `${label}\n\n${body}`) : "";
 }
-function inlineComments(source) {
+// Walk each file's unified-diff patch and record which LEFT (base) and RIGHT
+// (head) line numbers fall inside a hunk. Files without a patch (binary, too
+// large) are present with empty sets so they still qualify for file comments.
+function parseDiffLines(files) {
+    const result = new Map();
+    for (const file of files) {
+        const lines = { LEFT: new Set(), RIGHT: new Set() };
+        result.set(file.filename, lines);
+        if (!file.patch)
+            continue;
+        let inHunk = false;
+        let left = 0;
+        let right = 0;
+        for (const raw of file.patch.replace(/\n$/, "").split("\n")) {
+            const hunk = raw.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+            if (hunk) {
+                inHunk = true;
+                left = Number(hunk[1]);
+                right = Number(hunk[2]);
+                continue;
+            }
+            if (!inHunk)
+                continue;
+            if (raw.startsWith("-")) {
+                lines.LEFT.add(left++);
+            }
+            else if (raw.startsWith("+")) {
+                lines.RIGHT.add(right++);
+            }
+            else if (raw.startsWith(" ") || raw === "") {
+                lines.LEFT.add(left++);
+                lines.RIGHT.add(right++);
+            }
+        }
+    }
+    return result;
+}
+function nearest(candidates, target) {
+    let best;
+    for (const value of candidates) {
+        if (best === undefined || Math.abs(value - target) < Math.abs(best - target)) {
+            best = value;
+        }
+    }
+    return best;
+}
+// Turn model comments into payloads GitHub will accept. Lines outside the diff
+// snap to the nearest reviewable line in the same file; files outside the diff
+// become file-level comments. Nothing verified is dropped over a position.
+function inlineComments(source, diff) {
     const result = {
         comments: [],
         omitted: 0,
@@ -362,32 +533,62 @@ function inlineComments(source) {
             result.omitted += 1;
             continue;
         }
-        const payload = { path, line, side, body };
-        const startLine = Number(comment.start_line);
-        const startSide = comment.start_side === "LEFT" ? "LEFT" : side;
-        if (Number.isInteger(startLine) && startLine > 0 && startLine <= line) {
-            payload.start_line = startLine;
-            payload.start_side = startSide;
+        const fileLines = diff.get(path);
+        if (!fileLines) {
+            result.comments.push({
+                path,
+                subject_type: "file",
+                body: `_Reported at line ${line}, which is not part of this diff._\n\n${body}`,
+            });
+            continue;
         }
-        result.comments.push(payload);
+        const valid = fileLines[side];
+        if (valid.has(line)) {
+            const payload = { path, line, side, body };
+            const startLine = Number(comment.start_line);
+            const startSide = comment.start_side === "LEFT" ? "LEFT" : side;
+            // Ranges must start before the end line and stay inside the diff.
+            if (Number.isInteger(startLine) &&
+                startLine < line &&
+                fileLines[startSide].has(startLine)) {
+                payload.start_line = startLine;
+                payload.start_side = startSide;
+            }
+            result.comments.push(payload);
+            continue;
+        }
+        const snapped = nearest(valid, line) ?? nearest(fileLines[side === "LEFT" ? "RIGHT" : "LEFT"], line);
+        if (snapped === undefined) {
+            result.comments.push({
+                path,
+                subject_type: "file",
+                body: `_Reported at line ${line}, which is not part of this diff._\n\n${body}`,
+            });
+            continue;
+        }
+        result.comments.push({
+            path,
+            line: snapped,
+            side: valid.has(snapped) ? side : side === "LEFT" ? "RIGHT" : "LEFT",
+            body: `_Reported at line ${line}; nearest reviewable line shown._\n\n${body}`,
+        });
     }
     result.comments = result.comments.slice(0, 50);
     return result;
 }
-async function resolveThreads(github, core, owner, repo, pullNumber, entries, resolveLeftovers) {
+async function resolveThreads(github, core, owner, repo, pullNumber, entries) {
     const seen = new Set();
     const unique = [];
     for (const entry of entries) {
         const id = String(entry.id ?? "").trim();
-        // 100 = combined schema cap (50 resolved + 50 dismissed).
-        if (!id || seen.has(id) || unique.length >= 100)
+        if (!id || seen.has(id))
             continue;
         seen.add(id);
         unique.push({ ...entry, id });
     }
     let ok = 0;
     let failed = 0;
-    if (unique.length === 0 && !resolveLeftovers)
+    if (unique.length === 0)
         return { ok, failed };
     const appSlug = process.env.M6D_APP_SLUG;
     if (!appSlug)
@@ -397,18 +598,6 @@ async function resolveThreads(github, core, owner, repo, pullNumber, entries, re
         thread.id,
         thread,
     ]));
-    if (resolveLeftovers) {
-        for (const thread of currentThreads.values()) {
-            if (!thread.isResolved &&
-                !seen.has(thread.id) &&
-                (0, helpers_js_1.normalizeBotLogin)(thread.comments.nodes[0]?.author?.login) === appLogin) {
-                unique.push({
-                    id: thread.id,
-                    reply: "Resolving: the latest review approved this PR without re-raising this finding.",
-                });
-            }
-        }
-    }
     for (const entry of unique) {
         try {
             const thread = currentThreads.get(entry.id);
@@ -440,6 +629,33 @@ async function resolveThreads(github, core, owner, repo, pullNumber, entries, re
     }
     return { ok, failed };
 }
+// Merge the verifier's decisions with the retry pass (if it ran), then mark
+// every open thread that still has no decision as OPEN. A NOT_APPLICABLE
+// without the required explanation also stays OPEN rather than closing silently.
+function threadDecisions(review, core) {
+    const expected = fs.existsSync(OPEN_THREADS_FILE)
+        ? JSON.parse(fs.readFileSync(OPEN_THREADS_FILE, "utf8"))
+        : [];
+    const retry = fs.existsSync(".codex/threads.json")
+        ? (0, helpers_js_1.parseJson)(fs.readFileSync(".codex/threads.json", "utf8").trim(), "Codex thread retry output").threads
+        : [];
+    const byId = new Map();
+    for (const entry of [...(review.threads ?? []), ...(retry ?? [])]) {
+        if (entry?.thread_id && !byId.has(entry.thread_id)) {
+            byId.set(entry.thread_id, entry);
+        }
+    }
+    return expected.map((id) => {
+        const entry = byId.get(id);
+        if (!entry)
+            return { thread_id: id, status: "OPEN", reply: null };
+        if (entry.status === "NOT_APPLICABLE" && !entry.reply?.trim()) {
+            core.warning(`Thread ${id}: NOT_APPLICABLE without a reply; leaving it open.`);
+            return { thread_id: id, status: "OPEN", reply: null };
+        }
+        return entry;
+    });
+}
 async function submit({ github, context, core, }) {
     const { owner, repo } = context.repo;
     const pullNumber = Number(process.env.M6D_PR_NUMBER);
@@ -451,92 +667,116 @@ async function submit({ github, context, core, }) {
     if (!Number.isInteger(quality) || quality < 1 || quality > 10) {
         throw new Error(`Invalid quality_score from Codex: ${review.quality_score}`);
     }
-    const comments = Array.isArray(review.comments) ? review.comments : [];
-    const resolvedIds = Array.isArray(review.resolved_thread_ids)
-        ? review.resolved_thread_ids
+    // The diff we validate positions against and the commit we pin the review to
+    // must be the same one Codex reviewed. If a push landed meanwhile, the newer
+    // run owns this PR and this result is stale.
+    const reviewedSha = process.env.M6D_HEAD_SHA;
+    const liveSha = (await github.rest.pulls.get({ owner, repo, pull_number: pullNumber })).data.head.sha;
+    if (reviewedSha && liveSha !== reviewedSha) {
+        throw new Error(`PR head moved from ${reviewedSha.slice(0, 7)} to ${liveSha.slice(0, 7)} during the review; a newer run supersedes this one.`);
+    }
+    // INFO never blocks: it stays in the review body and is never posted inline.
+    const comments = (Array.isArray(review.comments) ? review.comments : []).filter((comment) => comment.severity !== "INFO");
+    const dropped = Array.isArray(review.dropped) ? review.dropped : [];
+    const threads = threadDecisions(review, core);
+    const openThreads = threads.filter((entry) => entry.status === "OPEN");
+    const files = comments.length
+        ? await github.paginate(github.rest.pulls.listFiles, {
+            owner,
+            repo,
+            pull_number: pullNumber,
+            per_page: 100,
+        })
         : [];
-    const dismissed = Array.isArray(review.dismissed_threads)
-        ? review.dismissed_threads
-        : [];
-    const inline = inlineComments(comments);
+    const inline = inlineComments(comments, parseDiffLines(files));
+    // Resolve before posting the verdict so a failed resolution can still
+    // downgrade the review instead of leaving an approval with open threads.
+    const resolved = await resolveThreads(github, core, owner, repo, pullNumber, threads
+        .filter((entry) => entry.status !== "OPEN")
+        .map((entry) => ({
+        id: entry.thread_id,
+        reply: entry.status === "NOT_APPLICABLE" ? entry.reply ?? undefined : undefined,
+    })));
     const canApprove = review.event === "APPROVE" &&
         review.merge_decision === "MERGE" &&
-        inline.comments.length === 0;
+        inline.comments.length === 0 &&
+        openThreads.length === 0 &&
+        resolved.failed === 0;
     const event = canApprove ? "APPROVE" : "REQUEST_CHANGES";
     const mergeDecision = canApprove ? "MERGE" : "DO_NOT_MERGE";
-    let body = (0, helpers_js_1.truncate)(review.body, 60000);
+    let body = String(review.body ?? "").trim();
     if (!body)
         throw new Error("Codex review body is empty.");
+    if (resolved.failed > 0) {
+        body += `\n\nWorkflow note: ${resolved.failed} review thread(s) could not be resolved; see the run log.`;
+    }
+    if (openThreads.length > 0) {
+        body += [
+            "",
+            "",
+            `Open review threads still to address: ${openThreads.length}`,
+            ...openThreads.map((entry) => `- ${entry.thread_id}`),
+        ].join("\n");
+    }
+    if (dropped.length > 0) {
+        body += [
+            "",
+            "",
+            "<details>",
+            `<summary>Considered and dropped (${dropped.length})</summary>`,
+            "",
+            ...dropped.map((entry) => `- **${(0, helpers_js_1.truncate)(entry.title, 200)}**: ${(0, helpers_js_1.truncate)(entry.reason, 500)}`),
+            "",
+            "</details>",
+        ].join("\n");
+    }
     if (inline.omitted > 0) {
         body += `\n\nWorkflow note: ${inline.omitted} inline comment(s) were omitted because they were missing path, line, or body.`;
     }
-    let created;
-    let postedInline = inline.comments.length;
-    try {
-        created = await github.rest.pulls.createReview({
-            owner,
-            repo,
-            pull_number: pullNumber,
-            event,
-            body,
-            comments: inline.comments,
-        });
+    // GitHub caps review bodies at 65536 characters; cut the assembled text.
+    body = (0, helpers_js_1.truncate)(body, 60000);
+    // Pin the review to the commit Codex actually reviewed. Without this GitHub
+    // files it under the newest head, so a push during the run would attach the
+    // verdict and line numbers to code the review never saw.
+    const target = {
+        owner,
+        repo,
+        pull_number: pullNumber,
+        commit_id: reviewedSha,
+    };
+    // The batched review endpoint only takes line comments. File-level comments
+    // go through the single-comment endpoint, which is the one that accepts
+    // subject_type, after the review exists so they attach to the same commit.
+    const lineComments = inline.comments.filter((comment) => !comment.subject_type);
+    const fileComments = inline.comments.filter((comment) => comment.subject_type);
+    const created = await github.rest.pulls.createReview({
+        ...target,
+        event,
+        body,
+        comments: lineComments,
+    });
+    for (const comment of fileComments) {
+        await github.rest.pulls.createReviewComment({ ...target, ...comment });
     }
-    catch (error) {
-        if (inline.comments.length === 0)
-            throw error;
-        core.warning(`Batched review submission failed; retrying inline comments individually: ${(0, helpers_js_1.errorMessage)(error)}`);
-        created = await github.rest.pulls.createReview({
-            owner,
-            repo,
-            pull_number: pullNumber,
-            event,
-            body,
-        });
-        let rejected = 0;
-        for (const comment of inline.comments) {
-            try {
-                await github.rest.pulls.createReviewComment({
-                    owner,
-                    repo,
-                    pull_number: pullNumber,
-                    commit_id: process.env.M6D_HEAD_SHA,
-                    ...comment,
-                });
-            }
-            catch (commentError) {
-                rejected += 1;
-                core.warning(`Dropped inline comment at ${comment.path}:${comment.line}: ${(0, helpers_js_1.errorMessage)(commentError)}`);
-            }
-        }
-        postedInline = inline.comments.length - rejected;
-        if (rejected > 0) {
-            await github.rest.issues.createComment({
-                owner,
-                repo,
-                issue_number: pullNumber,
-                body: `Workflow note: GitHub rejected ${rejected} of ${inline.comments.length} inline comment position(s); the remaining ${postedInline} were posted individually.`,
-            });
-        }
-    }
-    const resolved = await resolveThreads(github, core, owner, repo, pullNumber, [
-        ...resolvedIds.map((id) => ({ id })),
-        ...dismissed.map((entry) => ({
-            id: entry.thread_id,
-            reply: entry.reason,
-        })),
-    ], event === "APPROVE");
     core.setOutput("review_event", event);
     core.setOutput("merge_decision", mergeDecision);
     core.setOutput("quality_score", String(quality));
-    core.setOutput("inline_count", String(postedInline));
+    core.setOutput("inline_count", String(inline.comments.length));
     core.setOutput("resolved_thread_count", String(resolved.ok));
     core.setOutput("failed_thread_resolution_count", String(resolved.failed));
     core.setOutput("review_url", created.data.html_url ?? "");
 }
-async function finish({ github, context, }) {
+async function finish({ github, context, core, }) {
     const { owner, repo } = context.repo;
     const pullNumber = Number(process.env.M6D_PR_NUMBER);
+    const headSha = process.env.M6D_HEAD_SHA || "";
+    // The status comment describes the current head only. A run that finished
+    // late for an older commit must not overwrite what the newer run wrote.
+    const current = (await github.rest.pulls.get({ owner, repo, pull_number: pullNumber })).data;
+    if (headSha && current.head.sha !== headSha) {
+        core.info(`Head moved from ${headSha.slice(0, 7)} to ${current.head.sha.slice(0, 7)}; leaving the status comment to the newer run.`);
+        return;
+    }
     const failed = process.env.M6D_FAILED_THREAD_COUNT || "0";
     const completed = process.env.M6D_CODEX_OUTCOME === "success" &&
         process.env.M6D_REVIEW_OUTCOME === "success";
@@ -577,7 +817,6 @@ async function finish({ github, context, }) {
             "",
             "Check this workflow run's logs for details.",
         ];
-    const headSha = process.env.M6D_HEAD_SHA || "";
     const body = [
         MARKER,
         "## Codex Review",

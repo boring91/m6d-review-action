@@ -2,7 +2,7 @@
 
 A composite GitHub Action for Codex pull-request reviews, trusted `@review` commands, and replies to review threads created by the review bot.
 
-Review and reply instructions live in `src/prompts/review.md` and `src/prompts/reply.md`.
+Finder, verifier, thread-retry, and reply instructions live in `src/prompts/finder.md`, `src/prompts/verify.md`, `src/prompts/threads.md`, and `src/prompts/reply.md`.
 
 The action has three modes because each mode is triggered by a different GitHub event. Consumer repositories keep three small workflow files while the review implementation lives here.
 
@@ -23,12 +23,6 @@ on:
         description: PR number to review
         required: true
         type: string
-      review_level:
-        description: Review depth
-        required: false
-        default: standard
-        type: choice
-        options: [standard, thorough]
 
 permissions: {}
 
@@ -44,18 +38,20 @@ jobs:
       github.event.pull_request.draft == false &&
       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: self-hosted
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: boring91/m6d-review-action@main
         with:
           mode: review
-          review-level: ${{ inputs.review_level || 'standard' }}
+          review-level: thorough
           base-branch: develop
           app-id: ${{ secrets.REVIEW_APP_ID }}
           app-private-key: ${{ secrets.REVIEW_APP_PRIVATE_KEY }}
 ```
 
-Pull-request events run a standard review. Run the workflow manually with `review_level: thorough`, or comment `@review thorough`, to have Codex delegate correctness, security, minimality, and taste reviews to four parallel subagents before verifying and combining their findings. Neither review level requires projects to have test coverage.
+Every review is a finder stage followed by a verifier stage. `review-level: standard` (the default) runs one finder pass covering correctness, security, minimality, and taste. `review-level: thorough` runs those four as separate finder passes in parallel, each in its own Codex session. In both cases a verifier pass then checks every candidate against the checked-out code, drops what it cannot prove, and writes the final review. Dropped candidates are listed in a collapsed section of the review body. A thorough review of a large PR can take 40 minutes or more, so keep the job timeout at 60. `INFO` findings appear in the body only and never block; everything `LOW` and above is posted inline and requests changes. Reviews do not require projects to have test coverage.
+
+Every open review-bot thread must receive an explicit decision: `FIXED` or `NOT_APPLICABLE` resolves it (the latter with a posted reply), `OPEN` leaves it and blocks approval. The open thread IDs are baked into the verifier's output schema so it cannot skip one. If it does anyway, one retry classifies just the missed threads; anything still undecided after that is treated as `OPEN`. Threads are never resolved by omission.
 
 ## Review command
 
@@ -130,19 +126,20 @@ jobs:
           app-private-key: ${{ secrets.REVIEW_APP_PRIVATE_KEY }}
 ```
 
+`@review` and the final review after all threads resolve dispatch `review.yml` with only `pr_number`, so they run at whatever `review-level` that workflow sets.
+
 The full-review workflow must remain named `review.yml` because command and reply modes dispatch it. If another filename is required, pass the same `review-workflow` input to the command and reply modes.
 
 ## Requirements
 
 - A self-hosted Linux runner with Codex CLI, Git, Bash, and `base64` available.
-- Thorough reviews require a current Codex CLI release with subagent support.
 - Codex CLI must already be authenticated on the runner.
 - A GitHub App installed on the consumer repository with Contents, Issues, Pull requests, and Actions write permissions.
 - Repository secrets named `REVIEW_APP_ID` and `REVIEW_APP_PRIVATE_KEY`, or equivalent values passed to the action inputs.
 
 Contents write permission is required because GitHub gates review-thread resolution on repository write access, even when the token already has Pull requests write permission.
 
-The action rejects drafts, forked pull requests, closed pull requests, and pull requests targeting a branch other than `base-branch`. Only owners, members, and collaborators can trigger `@review` or `@review thorough` commands or review-reply evaluations. Review runs use `gpt-5.6-sol`. Codex runs with `danger-full-access` and an approval policy of `never`.
+The action rejects drafts, forked pull requests, closed pull requests, and pull requests targeting a branch other than `base-branch`. Only owners, members, and collaborators can trigger `@review` commands or review-reply evaluations. A command comment must consist of exactly `@review`; mentions inside longer text are ignored. Review and reply runs use `gpt-5.6-sol` with `xhigh` reasoning effort. Codex runs with `danger-full-access` and an approval policy of `never`.
 
 Use `@main` while developing. Pin production consumers to `@v1` or an exact commit SHA after verification.
 
