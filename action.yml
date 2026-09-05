@@ -129,7 +129,7 @@ runs:
             -c 'agents.default_subagent_model="gpt-5.6-sol"'
           )
         fi
-        codex exec --model gpt-5.6-sol "${review_args[@]}" -c 'approval_policy="never"' -c 'sandbox_mode="danger-full-access"' --output-schema .codex/review-schema.json -o .codex/review.json - < .codex/review-prompt.md
+        codex exec --model gpt-5.6-sol -c 'model_reasoning_effort="xhigh"' "${review_args[@]}" -c 'approval_policy="never"' -c 'sandbox_mode="danger-full-access"' --output-schema .codex/review-schema.json -o .codex/review.json - < .codex/review-prompt.md
         test -s .codex/review.json
 
     - name: Submit pull-request review
@@ -259,7 +259,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        codex exec --ephemeral -c 'approval_policy="never"' -c 'sandbox_mode="danger-full-access"' --output-schema .codex/reply-schema.json -o .codex/reply.json - < .codex/reply-prompt.md
+        codex exec --model gpt-5.6-sol -c 'model_reasoning_effort="xhigh"' --ephemeral -c 'approval_policy="never"' -c 'sandbox_mode="danger-full-access"' --output-schema .codex/reply-schema.json -o .codex/reply.json - < .codex/reply-prompt.md
         test -s .codex/reply.json
 
     - name: Post review reply
