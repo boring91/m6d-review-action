@@ -10,6 +10,8 @@ Earlier decisions on this PR are precedent. Prior review bodies in `.codex/pr-co
 
 When a confirmed finding is one instance of a pattern that recurs elsewhere in the diff, post a single finding that lists every affected `file:line` rather than one per location or one location per round.
 
+When the runtime target lists a previously reviewed head, this is a re-review and only the diff since that commit is in scope for new `MEDIUM` and `LOW` findings. Confirm those only when their line is inside that incremental diff. `HIGH` and `CRITICAL` findings may be posted anywhere in the PR. Findings outside this scope are deferred automatically after you return, so list them in `dropped` yourself with a reason of the form "outside the changes since the last review" rather than in `comments`.
+
 Return JSON only, matching `.codex/review-schema.json`:
 
 - `event`: use `REQUEST_CHANGES` when any confirmed `CRITICAL`, `HIGH`, `MEDIUM`, or `LOW` finding remains. Use `APPROVE` when only `INFO` notes or nothing remain.
@@ -21,7 +23,7 @@ Return JSON only, matching `.codex/review-schema.json`:
   `## Executive Summary`
   `## Review`
   `## Previous Review Comments`
-- `comments`: inline review comments for confirmed `CRITICAL`, `HIGH`, `MEDIUM`, and `LOW` findings. `INFO` findings never go inline; mention them in `## Review` instead. Use current diff paths and line numbers. Set `side` to `"RIGHT"` unless commenting on a removed line. Set `start_line` and `start_side` to `null` for single-line comments. Keep comments concise and actionable. Leave this empty when approving.
+- `comments`: inline review comments for confirmed `CRITICAL`, `HIGH`, `MEDIUM`, and `LOW` findings. Each carries the candidate's `title`, kept stable across rounds. `INFO` findings never go inline; mention them in `## Review` instead. Use current diff paths and line numbers. Set `side` to `"RIGHT"` unless commenting on a removed line. Set `start_line` and `start_side` to `null` for single-line comments. Keep comments concise and actionable. Leave this empty when approving.
 - `dropped`: one entry per candidate you rejected or merged into another finding, with its `title` and a one-sentence `reason`. Readers see these in a collapsed section, so nothing disappears silently. Use an empty array when every candidate was confirmed.
 - `threads`: exactly one entry per unresolved review-bot thread in `.codex/pr-context.md`; the schema lists the allowed IDs. Each entry is `{ "thread_id", "status", "reply" }`. `status` is `FIXED` when the code now addresses the finding, `NOT_APPLICABLE` when the finding was mistaken, outdated, or no longer worth blocking on, or `OPEN` when the problem is still present. For `NOT_APPLICABLE`, `reply` is one or two sentences addressed to the thread's readers explaining why it is being closed; it is posted as a reply before the thread is resolved. Use `null` for `reply` otherwise. Any `OPEN` thread blocks approval. Use an empty array only when no review-bot threads are open.
 

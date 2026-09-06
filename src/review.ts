@@ -45,6 +45,7 @@ type ReviewThread = {
 };
 
 type ModelComment = {
+  title: string;
   path: string;
   line: number;
   side: "RIGHT" | "LEFT";
@@ -90,6 +91,20 @@ type ThreadDecision = {
 };
 
 const OPEN_THREADS_FILE = ".codex/open-threads.json";
+
+// Written by prepare on a re-review: the commit the bot last reviewed and the
+// GitHub compare-API files changed since. Absent on a first review or when the
+// history diverged (force push), in which case the whole diff is in scope.
+const INCREMENTAL_FILE = ".codex/incremental.json";
+type Incremental = {
+  previous_head: string;
+  files: Array<{ filename: string; patch?: string | null }>;
+};
+
+// Titles of every candidate an earlier round listed under "Considered and
+// dropped". A later round may not re-raise one unless the code it sits on
+// changed since that decision.
+const PRECEDENT_FILE = ".codex/precedent.json";
 
 export async function resolve({
   github,
@@ -160,6 +175,7 @@ function finders(level: string | undefined): Record<string, string> {
 
 // Shared by finder candidates and final inline comments.
 const commentFields = {
+  title: { type: "string", minLength: 1 },
   path: { type: "string", minLength: 1 },
   line: { type: "integer", minimum: 1 },
   side: { type: "string", enum: ["RIGHT", "LEFT"] },
@@ -182,9 +198,8 @@ function candidatesSchema(): Record<string, unknown> {
         items: {
           type: "object",
           additionalProperties: false,
-          required: ["title", ...Object.keys(commentFields), "evidence"],
+          required: [...Object.keys(commentFields), "evidence"],
           properties: {
-            title: { type: "string", minLength: 1 },
             ...commentFields,
             evidence: { type: "array", items: { type: "string", minLength: 1 } },
           },
@@ -543,6 +558,23 @@ export async function prepare({
   }
 
   const repository = `${owner}/${repo}`;
+  const appLogin = normalizeBotLogin(process.env.M6D_APP_SLUG);
+  const botReviews = reviews.filter(
+    (review) => normalizeBotLogin(review.user?.login) === appLogin,
+  );
+  const precedent = botReviews.flatMap((review) =>
+    [...String(review.body ?? "").matchAll(/^- \*\*(.+?)\*\*: /gm)].map(
+      (match) => match[1],
+    ),
+  );
+  const incremental = await incrementalScope(
+    github,
+    owner,
+    repo,
+    botReviews.map((review) => review.commit_id).filter(Boolean).pop(),
+    process.env.M6D_HEAD_SHA,
+  );
+
   const target = [
     "",
     "Runtime review target:",
@@ -550,11 +582,17 @@ export async function prepare({
     `- Base ref: ${process.env.M6D_BASE_REF}`,
     `- Base SHA: ${process.env.M6D_BASE_SHA}`,
     `- Head SHA: ${process.env.M6D_HEAD_SHA}`,
-    `- Compare with: git diff ${process.env.M6D_BASE_SHA}...${process.env.M6D_HEAD_SHA}`,
+    `- Full PR diff: git diff ${process.env.M6D_BASE_SHA}...${process.env.M6D_HEAD_SHA}`,
+    ...(incremental
+      ? [
+          `- Previously reviewed head: ${incremental.previous_head}`,
+          `- Changed since the last review: git diff ${incremental.previous_head}...${process.env.M6D_HEAD_SHA}`,
+          `- Files changed since the last review: ${incremental.files.map((file) => file.filename).join(", ")}`,
+        ]
+      : ["- This is the first review of this pull request."]),
     "",
   ].join("\n");
 
-  const appLogin = normalizeBotLogin(process.env.M6D_APP_SLUG);
   const openThreadIds = threads
     .filter(
       (thread) =>
@@ -577,6 +615,14 @@ export async function prepare({
     `${JSON.stringify(openThreadIds)}\n`,
     "utf8",
   );
+  fs.writeFileSync(PRECEDENT_FILE, `${JSON.stringify(precedent)}\n`, "utf8");
+  if (incremental) {
+    fs.writeFileSync(
+      INCREMENTAL_FILE,
+      `${JSON.stringify(incremental)}\n`,
+      "utf8",
+    );
+  }
   fs.writeFileSync(
     ".codex/candidates-schema.json",
     `${JSON.stringify(candidatesSchema(), null, 2)}\n`,
@@ -601,6 +647,40 @@ export async function prepare({
     `${readPrompt("verify.md").replace("{{repository}}", repository)}\n${target}`,
     "utf8",
   );
+}
+
+// On a re-review, the diff between the last bot-reviewed commit and the current
+// head. Returns undefined on a first review, after a force push, or when the
+// compare is too large to trust, so the caller falls back to the full diff.
+async function incrementalScope(
+  github: GitHub,
+  owner: string,
+  repo: string,
+  previousHead: string | undefined,
+  head: string | undefined,
+): Promise<Incremental | undefined> {
+  if (!previousHead || !head || previousHead === head) return undefined;
+  try {
+    const { data } = await github.rest.repos.compareCommits({
+      owner,
+      repo,
+      base: previousHead,
+      head,
+      per_page: 300,
+    });
+    if (data.status !== "ahead" || !data.files || data.files.length >= 300) {
+      return undefined;
+    }
+    return {
+      previous_head: previousHead,
+      files: data.files.map((file: { filename: string; patch?: string | null }) => ({
+        filename: file.filename,
+        patch: file.patch ?? null,
+      })),
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 // Runs after the verifier. If it skipped any open thread despite the schema,
@@ -857,6 +937,57 @@ async function resolveThreads(
   return { ok, failed };
 }
 
+// Word-overlap similarity between two finding titles, 0 to 1. Loose on purpose:
+// the same dropped concern gets reworded slightly every round.
+export function similarTitles(left: string, right: string): number {
+  const words = (value: string) =>
+    new Set(
+      value
+        .toLowerCase()
+        .replace(/[^a-z ]/g, "")
+        .split(" ")
+        .filter((word) => word.length > 3),
+    );
+  const a = words(left);
+  const b = words(right);
+  let shared = 0;
+  for (const word of a) if (b.has(word)) shared += 1;
+  return shared / Math.max(1, Math.min(a.size, b.size));
+}
+
+// Keep re-reviews converging. A finding on code untouched since the last review
+// is deferred unless it is HIGH or CRITICAL; a finding matching an earlier
+// dropped title is deferred unless its code changed since. Deferred findings
+// are appended to `dropped` so they stay visible without blocking.
+export function scopeComments(
+  comments: ModelComment[],
+  incremental: Incremental | undefined,
+  precedent: string[],
+  dropped: Array<{ title: string; reason: string }>,
+  core: Core,
+): ModelComment[] {
+  if (!incremental) return comments;
+  const changed = parseDiffLines(incremental.files);
+  const previous = incremental.previous_head.slice(0, 7);
+  return comments.filter((comment) => {
+    const lines = changed.get(normalizePath(comment.path));
+    const fresh = Boolean(
+      lines?.[comment.side === "LEFT" ? "LEFT" : "RIGHT"].has(Number(comment.line)),
+    );
+    if (fresh) return true;
+    const match = precedent.find((title) => similarTitles(title, comment.title) >= 0.6);
+    const reason = match
+      ? `Matches an earlier dropped item ("${truncate(match, 120)}") and its code has not changed since ${previous}.`
+      : comment.severity === "HIGH" || comment.severity === "CRITICAL"
+        ? undefined
+        : `Outside the changes since the last review (${previous}); noted here rather than blocking this round.`;
+    if (!reason) return true;
+    core.info(`Deferred ${comment.severity} "${comment.title}" at ${comment.path}:${comment.line}: ${reason}`);
+    dropped.push({ title: comment.title, reason });
+    return false;
+  });
+}
+
 // Merge the verifier's decisions with the retry pass (if it ran), then mark
 // every open thread that still has no decision as OPEN. A NOT_APPLICABLE
 // without the required explanation also stays OPEN rather than closing silently.
@@ -924,11 +1055,21 @@ export async function submit({
     );
   }
 
+  const dropped = Array.isArray(review.dropped) ? [...review.dropped] : [];
   // INFO never blocks: it stays in the review body and is never posted inline.
-  const comments = (Array.isArray(review.comments) ? review.comments : []).filter(
-    (comment) => comment.severity !== "INFO",
+  const comments = scopeComments(
+    (Array.isArray(review.comments) ? review.comments : []).filter(
+      (comment) => comment.severity !== "INFO",
+    ),
+    fs.existsSync(INCREMENTAL_FILE)
+      ? (JSON.parse(fs.readFileSync(INCREMENTAL_FILE, "utf8")) as Incremental)
+      : undefined,
+    fs.existsSync(PRECEDENT_FILE)
+      ? (JSON.parse(fs.readFileSync(PRECEDENT_FILE, "utf8")) as string[])
+      : [],
+    dropped,
+    core,
   );
-  const dropped = Array.isArray(review.dropped) ? review.dropped : [];
   const threads = threadDecisions(review, core);
   const openThreads = threads.filter((entry) => entry.status === "OPEN");
   const files = comments.length
