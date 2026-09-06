@@ -418,7 +418,12 @@ async function prepare({ github, context, }) {
     const repository = `${owner}/${repo}`;
     const appLogin = (0, helpers_js_1.normalizeBotLogin)(process.env.M6D_APP_SLUG);
     const botReviews = reviews.filter((review) => (0, helpers_js_1.normalizeBotLogin)(review.user?.login) === appLogin);
-    const precedent = botReviews.flatMap((review) => [...String(review.body ?? "").matchAll(/^- \*\*(.+?)\*\*: /gm)].map((match) => match[1]));
+    // Only genuine rejections are precedent. A candidate the verifier merged
+    // into a confirmed finding was a duplicate of something real, and blocking
+    // its wording later could suppress that finding's own follow-ups.
+    const precedent = botReviews.flatMap((review) => [...String(review.body ?? "").matchAll(/^- \*\*(.+?)\*\*: (.*)$/gm)]
+        .filter((match) => !/^merged (into|with)\b/i.test(match[2]))
+        .map((match) => match[1]));
     const incremental = await incrementalScope(github, owner, repo, botReviews.map((review) => review.commit_id).filter(Boolean).pop(), process.env.M6D_HEAD_SHA);
     const target = [
         "",
