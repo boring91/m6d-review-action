@@ -246,6 +246,25 @@ async function inTemporaryDirectory(run) {
             created_at: "2026-01-01T00:00:00Z",
         },
     ];
+    // One earlier bot review: its dropped list becomes precedent and its commit
+    // becomes the incremental base. A human review must not count.
+    const priorReviews = [
+        {
+            user: { login: "human-reviewer" },
+            commit_id: "human-sha",
+            state: "COMMENTED",
+            submitted_at: "2026-01-01T00:00:00Z",
+            body: "- **Not precedent**: humans are not the bot.",
+        },
+        {
+            user: { login: "m6d-review[bot]" },
+            commit_id: "prev-sha",
+            state: "CHANGES_REQUESTED",
+            submitted_at: "2026-01-02T00:00:00Z",
+            body: "## Review\n\n<details>\n- **Reuse the URL aliases**: no defect shown.\n- **Derive process names from the map**: matches today.\n</details>",
+        },
+    ];
+    const compares = [];
     const github = {
         rest: {
             issues: {
@@ -254,8 +273,19 @@ async function inTemporaryDirectory(run) {
                 createComment: async () => assert.fail("should update the existing app comment"),
             },
             pulls: { listReviews },
+            repos: {
+                compareCommits: async (payload) => {
+                    compares.push(payload);
+                    return {
+                        data: {
+                            status: "ahead",
+                            files: [{ filename: "src/changed.ts", patch: "@@ -1,2 +1,3 @@\n a\n+b\n c" }],
+                        },
+                    };
+                },
+            },
         },
-        paginate: async (endpoint) => endpoint === listReviews ? [] : comments,
+        paginate: async (endpoint) => endpoint === listReviews ? priorReviews : comments,
         graphql: async (query, variables) => {
             // Second page of comments for the open thread, fetched by node id.
             if (query.includes("node(id: $id)")) {
@@ -347,6 +377,25 @@ async function inTemporaryDirectory(run) {
         assert.deepEqual(schema.properties.threads.items.properties.thread_id.enum, [
             "open-bot-thread",
         ]);
+        // Re-review: precedent comes only from bot reviews, and the incremental
+        // scope is the compare from the last bot-reviewed commit to the head.
+        assert.deepEqual(JSON.parse(read("precedent.json")), [
+            "Reuse the URL aliases",
+            "Derive process names from the map",
+        ]);
+        assert.deepEqual(compares.at(-1), {
+            owner: "acme",
+            repo: "project",
+            base: "prev-sha",
+            head: "head-sha",
+            per_page: 300,
+        });
+        const incremental = JSON.parse(read("incremental.json"));
+        assert.equal(incremental.previous_head, "prev-sha");
+        assert.deepEqual(incremental.files.map((file) => file.filename), ["src/changed.ts"]);
+        assert.match(verifyPrompt, /Previously reviewed head: prev-sha/);
+        assert.match(verifyPrompt, /Changed since the last review: git diff prev-sha\.\.\.head-sha/);
+        assert.match(securityPrompt, /Files changed since the last review: src\/changed\.ts/);
     });
     // One status update per prepare call, always to the app's own comment.
     assert.deepEqual(updates.map((update) => update.comment_id), [2, 2]);
@@ -838,4 +887,48 @@ async function inTemporaryDirectory(run) {
         assert.deepEqual(fs.readdirSync(path.join(directory, ".codex/finders")), ["review.md"]);
         assert.equal(fs.existsSync(path.join(directory, ".codex/candidates")), false);
     });
+});
+(0, node_test_1.test)("re-reviews defer findings on unchanged code and on dropped precedent", () => {
+    const core = createCore();
+    const dropped = [
+        { title: "From the verifier", reason: "already there" },
+    ];
+    const comment = (overrides) => ({
+        title: "Some finding",
+        path: "src/a.ts",
+        line: 5,
+        side: "RIGHT",
+        start_line: null,
+        start_side: null,
+        severity: "MEDIUM",
+        body: "Body.",
+        ...overrides,
+    });
+    const incremental = {
+        previous_head: "prevsha1234567890",
+        // Only src/a.ts lines 5-6 changed since the last review.
+        files: [{ filename: "src/a.ts", patch: "@@ -5,1 +5,2 @@\n old\n+new" }],
+    };
+    const precedent = ["Derive controllable process names from the parsed process map"];
+    const kept = review.scopeComments([
+        comment({ title: "Fresh medium", line: 6 }),
+        comment({ title: "Stale medium", path: "src/b.ts", line: 40 }),
+        comment({ title: "Stale high survives", path: "src/b.ts", line: 41, severity: "HIGH" }),
+        comment({ title: "Derive process names from the parsed process map", path: "src/b.ts", line: 42, severity: "HIGH" }),
+        comment({ title: "Derive process names from the parsed process map", line: 5, severity: "LOW" }),
+    ], incremental, precedent, dropped, core);
+    assert.deepEqual(kept.map((entry) => entry.title), ["Fresh medium", "Stale high survives", "Derive process names from the parsed process map"]);
+    // The precedent match on fresh code (line 5) is kept: the code changed, so the
+    // earlier reason may no longer hold. The one on stale code is deferred even
+    // though it is HIGH, because precedent outranks severity.
+    assert.deepEqual(dropped.map((entry) => entry.title), ["From the verifier", "Stale medium", "Derive process names from the parsed process map"]);
+    assert.match(dropped[1].reason, /Outside the changes since the last review \(prevsha\)/);
+    assert.match(dropped[2].reason, /Matches an earlier dropped item/);
+    // First review: nothing is deferred.
+    const first = review.scopeComments([comment({ title: "Anything", path: "src/z.ts", line: 999, severity: "LOW" })], undefined, precedent, [], core);
+    assert.equal(first.length, 1);
+    // Rewordings seen across real rounds must match; unrelated titles must not.
+    assert.ok(review.similarTitles("Derive controllable process names from the parsed process map", "Derive valid process names from the process map already being parsed") >= 0.6);
+    assert.ok(review.similarTitles("Infrastructure defaults have three sources of truth", "Infrastructure defaults have three independent sources") >= 0.6);
+    assert.ok(review.similarTitles("Reuse the existing URL aliases", "Pin the MinIO image digest") < 0.3);
 });
