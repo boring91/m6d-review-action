@@ -562,10 +562,13 @@ export async function prepare({
   const botReviews = reviews.filter(
     (review) => normalizeBotLogin(review.user?.login) === appLogin,
   );
+  // Only genuine rejections are precedent. A candidate the verifier merged
+  // into a confirmed finding was a duplicate of something real, and blocking
+  // its wording later could suppress that finding's own follow-ups.
   const precedent = botReviews.flatMap((review) =>
-    [...String(review.body ?? "").matchAll(/^- \*\*(.+?)\*\*: /gm)].map(
-      (match) => match[1],
-    ),
+    [...String(review.body ?? "").matchAll(/^- \*\*(.+?)\*\*: (.*)$/gm)]
+      .filter((match) => !/^merged (into|with)\b/i.test(match[2]))
+      .map((match) => match[1]),
   );
   const incremental = await incrementalScope(
     github,

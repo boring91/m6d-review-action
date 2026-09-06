@@ -124,11 +124,11 @@ test("packaged prompts load independently of the working directory", async () =>
   });
 });
 
-test("review action pins GPT-5.6 Sol at xhigh for every Codex call", () => {
+test("review action pins GPT-5.6 Sol at high reasoning for every Codex call", () => {
   const action = fs.readFileSync(path.join(__dirname, "../action.yml"), "utf8");
   // Shared review invocation (finders and verifier), thread retry, and reply.
   assert.equal(
-    action.match(/codex exec --model gpt-5\.6-sol -c 'model_reasoning_effort="xhigh"' --ephemeral/g)?.length,
+    action.match(/codex exec --model gpt-5\.6-sol -c 'model_reasoning_effort="high"' --ephemeral/g)?.length,
     3,
   );
   assert.doesNotMatch(action, /agents\./);
@@ -273,7 +273,7 @@ test("status updates only the current GitHub App comment", async () => {
       commit_id: "prev-sha",
       state: "CHANGES_REQUESTED",
       submitted_at: "2026-01-02T00:00:00Z",
-      body: "## Review\n\n<details>\n- **Reuse the URL aliases**: no defect shown.\n- **Derive process names from the map**: matches today.\n</details>",
+      body: "## Review\n\n<details>\n- **Reuse the URL aliases**: no defect shown.\n- **Derive process names from the map**: matches today.\n- **Scoped skills never expose loadSkill**: Merged into the confirmed finding “Scoped skills lack a loadSkill tool.”\n</details>",
     },
   ];
   const compares: AnyRecord[] = [];
@@ -403,8 +403,9 @@ test("status updates only the current GitHub App comment", async () => {
       "open-bot-thread",
     ]);
 
-    // Re-review: precedent comes only from bot reviews, and the incremental
-    // scope is the compare from the last bot-reviewed commit to the head.
+    // Re-review: precedent comes only from bot reviews and only from genuine
+    // rejections; a candidate merged into a confirmed finding is not precedent.
+    // The incremental scope is the compare from the last bot-reviewed commit.
     assert.deepEqual(JSON.parse(read("precedent.json")), [
       "Reuse the URL aliases",
       "Derive process names from the map",
