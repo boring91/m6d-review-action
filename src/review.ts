@@ -108,11 +108,13 @@ type Incremental = {
 const PRECEDENT_FILE = ".codex/precedent.json";
 
 // Every inline comment earlier rounds posted, keyed by its title: the reviews
-// (rounds) that raised it and the threads still open on it. A MEDIUM or LOW
-// finding raised in RAISED_LIMIT earlier rounds is conceded: it moves to the
-// dropped list with the invariant and its open threads are resolved with that
-// invariant as the reply. Titles are matched exactly so a neighbouring finding
-// cannot be capped by resemblance.
+// (rounds) that raised it and the author then changed the code under, and the
+// threads still open on it. A MEDIUM or LOW finding that survived RAISED_LIMIT
+// such fix attempts is conceded: it moves to the dropped list with the
+// invariant and its open threads are resolved with that invariant as the
+// reply. A round the author ignored does not count, so an unaddressed finding
+// keeps blocking. Titles are matched exactly so a neighbouring finding cannot
+// be capped by resemblance.
 const RAISED_FILE = ".codex/raised.json";
 const RAISED_LIMIT = 2;
 type Raised = Record<string, { rounds: string[]; open: string[] }>;
@@ -603,7 +605,9 @@ export async function prepare({
     if (!title) continue;
     const entry = (raised[title] ??= { rounds: [], open: [] });
     const round = first?.pullRequestReview?.id ?? thread.id;
-    if (!entry.rounds.includes(round)) entry.rounds.push(round);
+    // GitHub marks a thread outdated once the lines it sits on change, which
+    // is the signal that the author attempted a fix after that round.
+    if (thread.isOutdated && !entry.rounds.includes(round)) entry.rounds.push(round);
     if (!thread.isResolved) entry.open.push(thread.id);
   }
   const incremental = await incrementalScope(
@@ -631,7 +635,7 @@ export async function prepare({
       : ["- This is the first review of this pull request."]),
     ...(Object.keys(raised).length
       ? [
-          "- Findings already posted inline in earlier rounds, with the number of rounds:",
+          "- Findings already posted inline in earlier rounds, with the number of fix attempts since:",
           ...Object.entries(raised).map(([title, { rounds }]) => `  - ${title} (${rounds.length})`),
         ]
       : []),
@@ -1004,8 +1008,8 @@ export function similarTitles(left: string, right: string): number {
   return shared / Math.max(1, Math.min(a.size, b.size));
 }
 
-// Keep re-reviews converging. A MEDIUM or LOW finding already raised under the
-// same title in RAISED_LIMIT earlier rounds is deferred and its open threads
+// Keep re-reviews converging. A MEDIUM or LOW finding raised under the same
+// title in RAISED_LIMIT earlier rounds the author then acted on is deferred and its open threads
 // are handed back as `conceded` so the caller resolves them with the finding's
 // body as the closing reply; a finding on code untouched since the last review
 // is deferred unless it is HIGH or CRITICAL; a finding matching an earlier
@@ -1031,9 +1035,9 @@ export function scopeComments(
     const earlier = raised[findingTitle(comment.title)];
     if (blocking(comment) || !earlier || earlier.rounds.length < RAISED_LIMIT) return true;
     const invariant = truncate(comment.body, 1500).replace(/\s+/g, " ");
-    const reply = `Raised in ${earlier.rounds.length} earlier rounds; closing so the review does not loop on it. The trade-off is the author's call. Invariant: ${invariant}`;
+    const reply = `Raised in ${earlier.rounds.length} earlier rounds and still present after the fixes; closing so the review does not loop on it. The trade-off is the author's call. Invariant: ${invariant}`;
     conceded.push(...earlier.open.map((id) => ({ id, reply })));
-    return defer(comment, `${CONCEDED} after ${earlier.rounds.length} rounds. ${invariant}`);
+    return defer(comment, `${CONCEDED} after ${earlier.rounds.length} fix attempts. ${invariant}`);
   });
   const scope = (kept: ModelComment[]) => ({ comments: kept, conceded });
   if (!incremental) return scope(capped);
