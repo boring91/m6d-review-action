@@ -61,6 +61,22 @@ const INCREMENTAL_FILE = ".codex/incremental.json";
 // dropped". A later round may not re-raise one unless the code it sits on
 // changed since that decision.
 const PRECEDENT_FILE = ".codex/precedent.json";
+// Every inline comment earlier rounds posted, keyed by its title: the reviews
+// (rounds) that raised it and the threads still open on it. A MEDIUM or LOW
+// finding raised in RAISED_LIMIT earlier rounds is conceded: it moves to the
+// dropped list with the invariant and its open threads are resolved with that
+// invariant as the reply. Titles are matched exactly so a neighbouring finding
+// cannot be capped by resemblance.
+const RAISED_FILE = ".codex/raised.json";
+const RAISED_LIMIT = 2;
+const CONCEDED = "Conceded to the author";
+const LABEL = /^(?:🔴|🟠|🟡|🔵|🟢) (?:CRITICAL|HIGH|MEDIUM|LOW|INFO)\s*/;
+// The title line commentBody writes, after any snapping note.
+const RAISED_TITLE = /(?:^|\n)(?:🔴|🟠|🟡|🔵|🟢) (?:CRITICAL|HIGH|MEDIUM|LOW|INFO) \*\*(.+?)\*\*\n/;
+// One spelling of a title for the comment header and the raised lookup.
+function findingTitle(value) {
+    return (0, helpers_js_1.truncate)(value, 200).replace(/\*\*/g, "").replace(/\s+/g, " ").trim();
+}
 async function resolve({ github, context, core, }) {
     const { owner, repo } = context.repo;
     const pullRequest = context.payload.pull_request ??
@@ -294,6 +310,7 @@ const COMMENT_FIELDS = `
   fragment commentFields on PullRequestReviewComment {
     databaseId
     author { login }
+    pullRequestReview { id }
     body
     createdAt
     path
@@ -421,9 +438,27 @@ async function prepare({ github, context, }) {
     // Only genuine rejections are precedent. A candidate the verifier merged
     // into a confirmed finding was a duplicate of something real, and blocking
     // its wording later could suppress that finding's own follow-ups.
+    // A conceded finding is not precedent either: the reviewer still believed
+    // it, so a later HIGH on the same code must not be silenced by it.
     const precedent = botReviews.flatMap((review) => [...String(review.body ?? "").matchAll(/^- \*\*(.+?)\*\*: (.*)$/gm)]
         .filter((match) => !/^merged (into|with)\b/i.test(match[2]))
+        .filter((match) => !match[2].startsWith(CONCEDED))
         .map((match) => match[1]));
+    const raised = {};
+    for (const thread of threads) {
+        const first = thread.comments.nodes[0];
+        if ((0, helpers_js_1.normalizeBotLogin)(first?.author?.login) !== appLogin)
+            continue;
+        const title = String(first?.body ?? "").match(RAISED_TITLE)?.[1];
+        if (!title)
+            continue;
+        const entry = (raised[title] ??= { rounds: [], open: [] });
+        const round = first?.pullRequestReview?.id ?? thread.id;
+        if (!entry.rounds.includes(round))
+            entry.rounds.push(round);
+        if (!thread.isResolved)
+            entry.open.push(thread.id);
+    }
     const incremental = await incrementalScope(github, owner, repo, botReviews.map((review) => review.commit_id).filter(Boolean).pop(), process.env.M6D_HEAD_SHA);
     const target = [
         "",
@@ -440,6 +475,12 @@ async function prepare({ github, context, }) {
                 `- Files changed since the last review: ${incremental.files.map((file) => file.filename).join(", ")}`,
             ]
             : ["- This is the first review of this pull request."]),
+        ...(Object.keys(raised).length
+            ? [
+                "- Findings already posted inline in earlier rounds, with the number of rounds:",
+                ...Object.entries(raised).map(([title, { rounds }]) => `  - ${title} (${rounds.length})`),
+            ]
+            : []),
         "",
     ].join("\n");
     const openThreadIds = threads
@@ -453,6 +494,7 @@ async function prepare({ github, context, }) {
     fs.writeFileSync(".codex/pr-context.md", `${contextLines.join("\n")}\n`, "utf8");
     fs.writeFileSync(OPEN_THREADS_FILE, `${JSON.stringify(openThreadIds)}\n`, "utf8");
     fs.writeFileSync(PRECEDENT_FILE, `${JSON.stringify(precedent)}\n`, "utf8");
+    fs.writeFileSync(RAISED_FILE, `${JSON.stringify(raised)}\n`, "utf8");
     if (incremental) {
         fs.writeFileSync(INCREMENTAL_FILE, `${JSON.stringify(incremental)}\n`, "utf8");
     }
@@ -520,13 +562,18 @@ function normalizePath(value) {
         .trim()
         .replace(/^[ab]\//, "");
 }
+// Inline comments open with the severity label and the finding's title, so a
+// later round can recognise a finding it already raised (see RAISED_FILE).
 function commentBody(comment) {
     const key = SEVERITY[comment.severity]
         ? comment.severity
         : "MEDIUM";
     const label = SEVERITY[key];
-    const body = (0, helpers_js_1.truncate)(comment.body, 4000);
-    return body ? (body.startsWith(label) ? body : `${label}\n\n${body}`) : "";
+    const body = (0, helpers_js_1.truncate)(comment.body, 4000).replace(LABEL, "");
+    const title = findingTitle(comment.title);
+    if (!body)
+        return "";
+    return title ? `${label} **${title}**\n\n${body}` : `${label}\n\n${body}`;
 }
 // Walk each file's unified-diff patch and record which LEFT (base) and RIGHT
 // (head) line numbers fall inside a hunk. Files without a patch (binary, too
@@ -703,16 +750,36 @@ function similarTitles(left, right) {
             shared += 1;
     return shared / Math.max(1, Math.min(a.size, b.size));
 }
-// Keep re-reviews converging. A finding on code untouched since the last review
+// Keep re-reviews converging. A MEDIUM or LOW finding already raised under the
+// same title in RAISED_LIMIT earlier rounds is deferred and its open threads
+// are handed back as `conceded` so the caller resolves them with the finding's
+// body as the closing reply; a finding on code untouched since the last review
 // is deferred unless it is HIGH or CRITICAL; a finding matching an earlier
 // dropped title is deferred unless its code changed since. Deferred findings
 // are appended to `dropped` so they stay visible without blocking.
-function scopeComments(comments, incremental, precedent, dropped, core) {
+function scopeComments(comments, incremental, precedent, raised, dropped, core) {
+    const defer = (comment, reason) => {
+        core.info(`Deferred ${comment.severity} "${comment.title}" at ${comment.path}:${comment.line}: ${reason}`);
+        dropped.push({ title: comment.title, reason });
+        return false;
+    };
+    const blocking = (comment) => comment.severity === "HIGH" || comment.severity === "CRITICAL";
+    const conceded = [];
+    const capped = comments.filter((comment) => {
+        const earlier = raised[findingTitle(comment.title)];
+        if (blocking(comment) || !earlier || earlier.rounds.length < RAISED_LIMIT)
+            return true;
+        const invariant = (0, helpers_js_1.truncate)(comment.body, 1500).replace(/\s+/g, " ");
+        const reply = `Raised in ${earlier.rounds.length} earlier rounds; closing so the review does not loop on it. The trade-off is the author's call. Invariant: ${invariant}`;
+        conceded.push(...earlier.open.map((id) => ({ id, reply })));
+        return defer(comment, `${CONCEDED} after ${earlier.rounds.length} rounds. ${invariant}`);
+    });
+    const scope = (kept) => ({ comments: kept, conceded });
     if (!incremental)
-        return comments;
+        return scope(capped);
     const changed = parseDiffLines(incremental.files);
     const previous = incremental.previous_head.slice(0, 7);
-    return comments.filter((comment) => {
+    return scope(capped.filter((comment) => {
         const lines = changed.get(normalizePath(comment.path));
         const fresh = Boolean(lines?.[comment.side === "LEFT" ? "LEFT" : "RIGHT"].has(Number(comment.line)));
         if (fresh)
@@ -720,15 +787,11 @@ function scopeComments(comments, incremental, precedent, dropped, core) {
         const match = precedent.find((title) => similarTitles(title, comment.title) >= 0.6);
         const reason = match
             ? `Matches an earlier dropped item ("${(0, helpers_js_1.truncate)(match, 120)}") and its code has not changed since ${previous}.`
-            : comment.severity === "HIGH" || comment.severity === "CRITICAL"
+            : blocking(comment)
                 ? undefined
                 : `Outside the changes since the last review (${previous}); noted here rather than blocking this round.`;
-        if (!reason)
-            return true;
-        core.info(`Deferred ${comment.severity} "${comment.title}" at ${comment.path}:${comment.line}: ${reason}`);
-        dropped.push({ title: comment.title, reason });
-        return false;
-    });
+        return reason ? defer(comment, reason) : true;
+    }));
 }
 // Merge the verifier's decisions with the retry pass (if it ran), then mark
 // every open thread that still has no decision as OPEN. A NOT_APPLICABLE
@@ -778,12 +841,21 @@ async function submit({ github, context, core, }) {
     }
     const dropped = Array.isArray(review.dropped) ? [...review.dropped] : [];
     // INFO never blocks: it stays in the review body and is never posted inline.
-    const comments = scopeComments((Array.isArray(review.comments) ? review.comments : []).filter((comment) => comment.severity !== "INFO"), fs.existsSync(INCREMENTAL_FILE)
+    const { comments, conceded } = scopeComments((Array.isArray(review.comments) ? review.comments : []).filter((comment) => comment.severity !== "INFO"), fs.existsSync(INCREMENTAL_FILE)
         ? JSON.parse(fs.readFileSync(INCREMENTAL_FILE, "utf8"))
         : undefined, fs.existsSync(PRECEDENT_FILE)
         ? JSON.parse(fs.readFileSync(PRECEDENT_FILE, "utf8"))
-        : [], dropped, core);
-    const threads = threadDecisions(review, core);
+        : [], fs.existsSync(RAISED_FILE)
+        ? JSON.parse(fs.readFileSync(RAISED_FILE, "utf8"))
+        : {}, dropped, core);
+    // A conceded finding's threads close with the invariant as the reply even
+    // when the verifier kept them OPEN, so the cap actually ends the loop. One
+    // the verifier already marked FIXED closes as fixed instead.
+    const decisions = threadDecisions(review, core);
+    const fixed = new Set(decisions.filter((entry) => entry.status === "FIXED").map((entry) => entry.thread_id));
+    const concede = conceded.filter((entry) => !fixed.has(entry.id));
+    const concededIds = new Set(concede.map((entry) => entry.id));
+    const threads = decisions.filter((entry) => !concededIds.has(entry.thread_id));
     const openThreads = threads.filter((entry) => entry.status === "OPEN");
     const files = comments.length
         ? await github.paginate(github.rest.pulls.listFiles, {
@@ -796,12 +868,15 @@ async function submit({ github, context, core, }) {
     const inline = inlineComments(comments, parseDiffLines(files));
     // Resolve before posting the verdict so a failed resolution can still
     // downgrade the review instead of leaving an approval with open threads.
-    const resolved = await resolveThreads(github, core, owner, repo, pullNumber, threads
-        .filter((entry) => entry.status !== "OPEN")
-        .map((entry) => ({
-        id: entry.thread_id,
-        reply: entry.status === "NOT_APPLICABLE" ? entry.reply ?? undefined : undefined,
-    })));
+    const resolved = await resolveThreads(github, core, owner, repo, pullNumber, [
+        ...concede,
+        ...threads
+            .filter((entry) => entry.status !== "OPEN")
+            .map((entry) => ({
+            id: entry.thread_id,
+            reply: entry.status === "NOT_APPLICABLE" ? entry.reply ?? undefined : undefined,
+        })),
+    ]);
     const canApprove = review.event === "APPROVE" &&
         review.merge_decision === "MERGE" &&
         inline.comments.length === 0 &&

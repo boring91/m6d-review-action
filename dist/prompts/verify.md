@@ -8,6 +8,8 @@ Verify every candidate against the checked-out code and the diff between the bas
 
 Earlier decisions on this PR are precedent. Prior review bodies in `.codex/pr-context.md` include "Considered and dropped" lists and resolved threads may contain developer pushback the reviewer accepted. Drop any candidate that matches one of those unless the code it concerns changed in this push in a way that undoes the earlier reason; when you do keep one, state in its body what changed. Do not re-open a decision the developer already argued and won.
 
+The runtime target lists findings earlier rounds already posted inline. When you confirm one of those again, reuse its title exactly and write the body as the invariant the code has to satisfy, not the next counter-example, so the author can close it in one change. A `MEDIUM` or `LOW` finding already raised in two earlier rounds is conceded automatically after you return: it moves to the dropped list and its threads are resolved with your body as the closing reply, so write that body to stand on its own.
+
 When a confirmed finding is one instance of a pattern that recurs elsewhere in the diff, post a single finding that lists every affected `file:line` rather than one per location or one location per round.
 
 When the runtime target lists a previously reviewed head, this is a re-review and only the diff since that commit is in scope for new `MEDIUM` and `LOW` findings. Confirm those only when their line is inside that incremental diff. `HIGH` and `CRITICAL` findings may be posted anywhere in the PR. Findings outside this scope are deferred automatically after you return, so list them in `dropped` yourself with a reason of the form "outside the changes since the last review" rather than in `comments`.

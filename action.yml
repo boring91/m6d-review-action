@@ -120,16 +120,19 @@ runs:
       run: |
         set -euo pipefail
         codex_review() {
-          codex exec --model gpt-5.6-sol -c 'model_reasoning_effort="high"' --ephemeral -c 'approval_policy="never"' -c 'sandbox_mode="danger-full-access"' --output-schema "$1" -o "$2" - < "$3"
-          test -s "$2"
+          codex exec --model gpt-5.6-sol -c "model_reasoning_effort=\"$1\"" --ephemeral -c 'approval_policy="never"' -c 'sandbox_mode="danger-full-access"' --output-schema "$2" -o "$3" - < "$4"
+          test -s "$3"
         }
         # Finder prompts were written by prepare: one for standard, four for
         # thorough. They run in parallel; any finder failure fails the review.
+        # Finders run at high reasoning because recall drops sharply below it.
+        # The verifier runs at medium: on the same candidates it keeps every
+        # HIGH and MEDIUM finding at roughly half the wall time.
         mkdir -p .codex/candidates .codex/logs
         pids=()
         for prompt in .codex/finders/*.md; do
           name="$(basename "$prompt" .md)"
-          codex_review .codex/candidates-schema.json ".codex/candidates/$name.json" "$prompt" > ".codex/logs/$name.log" 2>&1 &
+          codex_review high .codex/candidates-schema.json ".codex/candidates/$name.json" "$prompt" > ".codex/logs/$name.log" 2>&1 &
           pids+=($!)
         done
         status=0
@@ -137,7 +140,7 @@ runs:
         cat .codex/logs/*.log
         test "$status" -eq 0
         # The verifier confirms or drops every candidate and writes the final review.
-        codex_review .codex/review-schema.json .codex/review.json .codex/review-prompt.md
+        codex_review medium .codex/review-schema.json .codex/review.json .codex/review-prompt.md
 
     - name: Check thread decisions
       id: check-threads

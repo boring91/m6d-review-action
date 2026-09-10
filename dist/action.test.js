@@ -127,15 +127,18 @@ async function inTemporaryDirectory(run) {
         assert.match((0, helpers_js_1.readPrompt)("verify.md"), /every affected `file:line`/);
         assert.match((0, helpers_js_1.readPrompt)("verify.md"), /never a finding/i);
         assert.match((0, helpers_js_1.readPrompt)("verify.md"), /NOT_APPLICABLE/);
+        assert.match((0, helpers_js_1.readPrompt)("verify.md"), /already raised in two earlier rounds/);
         assert.match((0, helpers_js_1.readPrompt)("threads.md"), /\{\{repository\}\}/);
         assert.match((0, helpers_js_1.readPrompt)("reply.md"), /\{\{repository\}\}/);
         assert.match((0, helpers_js_1.readPrompt)("reply.md"), /missing file or line is not a reason/);
     });
 });
-(0, node_test_1.test)("review action pins GPT-5.6 Sol at high reasoning for every Codex call", () => {
+(0, node_test_1.test)("review action runs finders at high reasoning and the verifier at medium", () => {
     const action = fs.readFileSync(path.join(__dirname, "../action.yml"), "utf8");
-    // Shared review invocation (finders and verifier), thread retry, and reply.
-    assert.equal(action.match(/codex exec --model gpt-5\.6-sol -c 'model_reasoning_effort="high"' --ephemeral/g)?.length, 3);
+    assert.match(action, /codex_review high \.codex\/candidates-schema\.json/);
+    assert.match(action, /codex_review medium \.codex\/review-schema\.json/);
+    // Thread retry and reply stay pinned at high.
+    assert.equal(action.match(/codex exec --model gpt-5\.6-sol -c 'model_reasoning_effort="high"' --ephemeral/g)?.length, 2);
     assert.doesNotMatch(action, /agents\./);
 });
 (0, node_test_1.test)("thread handlers request repository write access", () => {
@@ -261,7 +264,7 @@ async function inTemporaryDirectory(run) {
             commit_id: "prev-sha",
             state: "CHANGES_REQUESTED",
             submitted_at: "2026-01-02T00:00:00Z",
-            body: "## Review\n\n<details>\n- **Reuse the URL aliases**: no defect shown.\n- **Derive process names from the map**: matches today.\n- **Scoped skills never expose loadSkill**: Merged into the confirmed finding “Scoped skills lack a loadSkill tool.”\n</details>",
+            body: "## Review\n\n<details>\n- **Reuse the URL aliases**: no defect shown.\n- **Derive process names from the map**: matches today.\n- **Scoped skills never expose loadSkill**: Merged into the confirmed finding “Scoped skills lack a loadSkill tool.”\n- **Origin lookup is narrower than settlement**: Conceded to the author after 2 rounds. Page backward.\n</details>",
         },
     ];
     const compares = [];
@@ -309,14 +312,41 @@ async function inTemporaryDirectory(run) {
                                     id: "open-bot-thread",
                                     isResolved: false,
                                     comments: {
-                                        nodes: [{ author: { login: "m6d-review" }, body: "finding" }],
+                                        nodes: [
+                                            {
+                                                author: { login: "m6d-review" },
+                                                pullRequestReview: { id: "review-2" },
+                                                body: "🟡 MEDIUM **Origin lookup is narrower than settlement**\n\nfinding",
+                                            },
+                                        ],
                                         pageInfo: { hasNextPage: true, endCursor: "page-2" },
                                     },
                                 },
                                 {
                                     id: "resolved-bot-thread",
                                     isResolved: true,
-                                    comments: { nodes: [{ author: { login: "m6d-review" } }] },
+                                    comments: {
+                                        nodes: [
+                                            {
+                                                author: { login: "m6d-review" },
+                                                pullRequestReview: { id: "review-1" },
+                                                body: "_Reported at line 9; nearest reviewable line shown._\n\n🟡 MEDIUM **Origin lookup is narrower than settlement**\n\nfinding",
+                                            },
+                                        ],
+                                    },
+                                },
+                                {
+                                    id: "sibling-bot-thread",
+                                    isResolved: true,
+                                    comments: {
+                                        nodes: [
+                                            {
+                                                author: { login: "m6d-review" },
+                                                pullRequestReview: { id: "review-1" },
+                                                body: "🟡 MEDIUM **Origin lookup is narrower than settlement**\n\nsame finding, other line",
+                                            },
+                                        ],
+                                    },
                                 },
                                 {
                                     id: "human-thread",
@@ -378,12 +408,22 @@ async function inTemporaryDirectory(run) {
             "open-bot-thread",
         ]);
         // Re-review: precedent comes only from bot reviews and only from genuine
-        // rejections; a candidate merged into a confirmed finding is not precedent.
+        // rejections; a candidate merged into a confirmed finding is not precedent,
+        // and neither is a conceded one.
         // The incremental scope is the compare from the last bot-reviewed commit.
         assert.deepEqual(JSON.parse(read("precedent.json")), [
             "Reuse the URL aliases",
             "Derive process names from the map",
         ]);
+        // Rounds are distinct reviews: two threads from review-1 count once. Open
+        // threads are what a concession later resolves.
+        assert.deepEqual(JSON.parse(read("raised.json")), {
+            "Origin lookup is narrower than settlement": {
+                rounds: ["review-2", "review-1"],
+                open: ["open-bot-thread"],
+            },
+        });
+        assert.match(securityPrompt, /Origin lookup is narrower than settlement \(2\)/);
         assert.deepEqual(compares.at(-1), {
             owner: "acme",
             repo: "project",
@@ -488,6 +528,12 @@ async function inTemporaryDirectory(run) {
         // open bot threads. human-thread and foreign-thread are decoys the model
         // should never be able to close.
         fs.writeFileSync(path.join(directory, ".codex/open-threads.json"), JSON.stringify(["current-thread", "stale-thread"]));
+        // Both open threads raised "Slow path" in two earlier rounds. The verifier
+        // below re-raises it as MEDIUM: current-thread is FIXED so it closes as
+        // fixed, stale-thread is OPEN so the concession closes it with the invariant.
+        fs.writeFileSync(path.join(directory, ".codex/raised.json"), JSON.stringify({
+            "Slow path": { rounds: ["r1", "r2"], open: ["current-thread", "stale-thread"] },
+        }));
         fs.writeFileSync(path.join(directory, ".codex/review.json"), JSON.stringify({
             event: "REQUEST_CHANGES",
             merge_decision: "MERGE",
@@ -500,15 +546,13 @@ async function inTemporaryDirectory(run) {
                 { path: "src/a.ts", line: 2, side: "RIGHT", start_line: null, start_side: null, severity: "HIGH", body: "Bug." },
                 // Not in the diff: posted separately as a file-level comment.
                 { path: "src/other.ts", line: 9, side: "RIGHT", start_line: null, start_side: null, severity: "MEDIUM", body: "Also." },
+                // Third round of the same MEDIUM: conceded, never posted.
+                { title: "Slow path", path: "src/a.ts", line: 2, side: "RIGHT", start_line: null, start_side: null, severity: "MEDIUM", body: "Cache the lookup." },
             ],
             dropped: [],
             threads: [
                 { thread_id: "current-thread", status: "FIXED", reply: null },
-                {
-                    thread_id: "stale-thread",
-                    status: "NOT_APPLICABLE",
-                    reply: "No longer applicable after the refactor.",
-                },
+                { thread_id: "stale-thread", status: "OPEN", reply: null },
                 { thread_id: "human-thread", status: "FIXED", reply: null },
                 { thread_id: "foreign-thread", status: "FIXED", reply: null },
             ],
@@ -564,11 +608,14 @@ async function inTemporaryDirectory(run) {
     assert.equal(fileComments[0].subject_type, "file");
     assert.equal(fileComments[0].commit_id, "head-sha");
     assert.equal(fileComments[0].pull_number, 42);
-    // Decoy IDs are ignored because they are not on the checklist.
-    assert.deepEqual(resolved.slice(0, 2), ["current-thread", "stale-thread"]);
+    // The conceded finding is dropped, not posted, and its OPEN thread closes
+    // with the invariant as the reply; the FIXED one closes as fixed. Decoy IDs
+    // are ignored because they are not on the checklist.
+    assert.match(reviews[0].body, /\*\*Slow path\*\*: Conceded to the author after 2 rounds\. Cache the lookup\./);
+    assert.deepEqual(resolved.slice(0, 2), ["stale-thread", "current-thread"]);
     assert.equal(replies.length, 1);
     assert.equal(replies[0].comment_id, 3);
-    assert.match(replies[0].body, /No longer applicable after the refactor/);
+    assert.match(replies[0].body, /Raised in 2 earlier rounds.*Invariant: Cache the lookup\./);
     assert.equal(blockedResolvedThreads, "2");
     assert.equal(blockedFailedThreads, "0");
     // Second run: the blank NOT_APPLICABLE is treated as OPEN, so the model's
@@ -581,7 +628,7 @@ async function inTemporaryDirectory(run) {
     assert.match(reviews[1].body, /Considered and dropped \(1\)/);
     assert.match(reviews[1].body, /\*\*Unused import\*\*: Import is used in tests\./);
     assert.equal(core.outputs.inline_count, "0");
-    assert.deepEqual(resolved, ["current-thread", "stale-thread", "current-thread"]);
+    assert.deepEqual(resolved, ["stale-thread", "current-thread", "current-thread"]);
     assert.equal(core.outputs.resolved_thread_count, "1");
 });
 (0, node_test_1.test)("inline comments snap to the diff instead of being rejected", () => {
@@ -606,6 +653,7 @@ async function inTemporaryDirectory(run) {
         start_line: null,
         start_side: null,
         severity: "HIGH",
+        title: "Null ids",
         body: "Finding.",
         ...overrides,
     });
@@ -623,6 +671,9 @@ async function inTemporaryDirectory(run) {
         // File not in the diff at all also gets a file-level comment.
         comment({ path: "src/untouched.ts", line: 5 }),
         comment({ line: 0 }),
+        // A body that already opens with a label is not labelled twice.
+        comment({ line: 10, title: "Bold **inside** title", body: "🟡 MEDIUM\n\nAlready labelled." }),
+        comment({ line: 10, body: "The HIGH watermark is never reset." }),
     ], diff);
     assert.equal(omitted, 1);
     assert.deepEqual(comments.map(({ body, ...rest }) => rest), [
@@ -633,10 +684,15 @@ async function inTemporaryDirectory(run) {
         { path: "src/a.ts", line: 11, side: "LEFT" },
         { path: "assets/logo.png", subject_type: "file" },
         { path: "src/untouched.ts", subject_type: "file" },
+        { path: "src/a.ts", line: 10, side: "RIGHT" },
+        { path: "src/a.ts", line: 10, side: "RIGHT" },
     ]);
+    assert.equal(comments[7].body, "🟠 HIGH **Bold inside title**\n\nAlready labelled.");
+    assert.equal(comments[8].body, "🟠 HIGH **Null ids**\n\nThe HIGH watermark is never reset.");
     assert.match(comments[3].body, /^_Reported at line 40; nearest reviewable line shown\._/);
     assert.match(comments[5].body, /^_Reported at line 1, which is not part of this diff\._/);
-    assert.match(comments[0].body, /^🟠 HIGH\n\nFinding\./);
+    // The title rides on the comment so a later round can count re-raises.
+    assert.equal(comments[0].body, "🟠 HIGH **Null ids**\n\nFinding.");
 });
 (0, node_test_1.test)("thread check retries only skipped threads and merges the retry", async () => {
     const context = {
@@ -911,23 +967,47 @@ async function inTemporaryDirectory(run) {
         files: [{ filename: "src/a.ts", patch: "@@ -5,1 +5,2 @@\n old\n+new" }],
     };
     const precedent = ["Derive controllable process names from the parsed process map"];
-    const kept = review.scopeComments([
+    const raised = {
+        "Origin lookup is narrower than settlement": { rounds: ["r1", "r2"], open: ["t2"] },
+        // Resembles the title above but is a different finding; exact titles only.
+        "Origin lookup is narrower than the answer lookup": { rounds: ["r3"], open: [] },
+    };
+    const { comments: kept, conceded } = review.scopeComments([
         comment({ title: "Fresh medium", line: 6 }),
+        comment({ title: "Origin lookup is narrower than settlement", line: 6, body: "Page backward until the origin is found." }),
+        comment({ title: "Origin lookup is narrower than settlement", line: 6, severity: "HIGH" }),
+        comment({ title: "Origin lookup is narrower than the answer lookup", line: 6 }),
         comment({ title: "Stale medium", path: "src/b.ts", line: 40 }),
         comment({ title: "Stale high survives", path: "src/b.ts", line: 41, severity: "HIGH" }),
         comment({ title: "Derive process names from the parsed process map", path: "src/b.ts", line: 42, severity: "HIGH" }),
         comment({ title: "Derive process names from the parsed process map", line: 5, severity: "LOW" }),
-    ], incremental, precedent, dropped, core);
-    assert.deepEqual(kept.map((entry) => entry.title), ["Fresh medium", "Stale high survives", "Derive process names from the parsed process map"]);
+    ], incremental, precedent, raised, dropped, core);
+    // A MEDIUM raised under the same title in two earlier rounds is conceded even
+    // on fresh code, and its open thread closes with the invariant. The same
+    // title at HIGH still blocks, and a similar title raised once is untouched.
+    assert.deepEqual(kept.map((entry) => `${entry.severity} ${entry.title}`), [
+        "MEDIUM Fresh medium",
+        "HIGH Origin lookup is narrower than settlement",
+        "MEDIUM Origin lookup is narrower than the answer lookup",
+        "HIGH Stale high survives",
+        "LOW Derive process names from the parsed process map",
+    ]);
+    assert.deepEqual(conceded.map(({ id, reply }) => ({ id, invariant: reply?.includes("Page backward until the origin is found.") })), [{ id: "t2", invariant: true }]);
     // The precedent match on fresh code (line 5) is kept: the code changed, so the
     // earlier reason may no longer hold. The one on stale code is deferred even
     // though it is HIGH, because precedent outranks severity.
-    assert.deepEqual(dropped.map((entry) => entry.title), ["From the verifier", "Stale medium", "Derive process names from the parsed process map"]);
-    assert.match(dropped[1].reason, /Outside the changes since the last review \(prevsha\)/);
-    assert.match(dropped[2].reason, /Matches an earlier dropped item/);
+    assert.deepEqual(dropped.map((entry) => entry.title), [
+        "From the verifier",
+        "Origin lookup is narrower than settlement",
+        "Stale medium",
+        "Derive process names from the parsed process map",
+    ]);
+    assert.match(dropped[1].reason, /^Conceded to the author after 2 rounds\. Page backward/);
+    assert.match(dropped[2].reason, /Outside the changes since the last review \(prevsha\)/);
+    assert.match(dropped[3].reason, /Matches an earlier dropped item/);
     // First review: nothing is deferred.
-    const first = review.scopeComments([comment({ title: "Anything", path: "src/z.ts", line: 999, severity: "LOW" })], undefined, precedent, [], core);
-    assert.equal(first.length, 1);
+    const first = review.scopeComments([comment({ title: "Anything", path: "src/z.ts", line: 999, severity: "LOW" })], undefined, precedent, {}, [], core);
+    assert.equal(first.comments.length, 1);
     // Rewordings seen across real rounds must match; unrelated titles must not.
     assert.ok(review.similarTitles("Derive controllable process names from the parsed process map", "Derive valid process names from the process map already being parsed") >= 0.6);
     assert.ok(review.similarTitles("Infrastructure defaults have three sources of truth", "Infrastructure defaults have three independent sources") >= 0.6);
