@@ -463,7 +463,14 @@ async function prepare({ github, context, }) {
         if (!thread.isResolved)
             entry.open.push(thread.id);
     }
-    const incremental = await incrementalScope(github, owner, repo, botReviews.map((review) => review.commit_id).filter(Boolean).pop(), process.env.M6D_HEAD_SHA);
+    // Reply mode posts its thread answers as COMMENTED reviews pinned to the
+    // current head. Only a verdict review marks a commit as actually reviewed,
+    // so a reply landing just before this run must not collapse the scope.
+    const incremental = await incrementalScope(github, owner, repo, botReviews
+        .filter((review) => review.state !== "COMMENTED")
+        .map((review) => review.commit_id)
+        .filter(Boolean)
+        .pop(), process.env.M6D_HEAD_SHA);
     const target = [
         "",
         "Runtime review target:",

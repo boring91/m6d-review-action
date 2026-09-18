@@ -266,6 +266,15 @@ async function inTemporaryDirectory(run) {
             submitted_at: "2026-01-02T00:00:00Z",
             body: "## Review\n\n<details>\n- **Reuse the URL aliases**: no defect shown.\n- **Derive process names from the map**: matches today.\n- **Scoped skills never expose loadSkill**: Merged into the confirmed finding “Scoped skills lack a loadSkill tool.”\n- **Origin lookup is narrower than settlement**: Conceded to the author after 2 fix attempts. Page backward.\n</details>",
         },
+        // A reply-mode answer posted at the current head. It is not a verdict and
+        // must not become the incremental base, or the scope collapses to nothing.
+        {
+            user: { login: "m6d-review[bot]" },
+            commit_id: "head-sha",
+            state: "COMMENTED",
+            submitted_at: "2026-01-03T00:00:00Z",
+            body: "<!-- codex-reply:1 -->\nConfirmed. Resolving.",
+        },
     ];
     const compares = [];
     const github = {
