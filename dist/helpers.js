@@ -33,6 +33,8 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.WAIVE_COMMAND = exports.WAIVED = exports.WAIVED_MARKER = void 0;
+exports.raisedTitle = raisedTitle;
 exports.readPrompt = readPrompt;
 exports.parseJson = parseJson;
 exports.truncate = truncate;
@@ -43,6 +45,17 @@ exports.errorMessage = errorMessage;
 const fs = __importStar(require("node:fs"));
 const path = __importStar(require("node:path"));
 const TRUSTED_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+// A maintainer closes a finding without fixing it by replying
+// `@review waive <reason>` in its thread. The bot's closing reply carries this
+// marker and opens with WAIVED, and later rounds treat that title as precedent.
+exports.WAIVED_MARKER = "<!-- codex-waived -->";
+exports.WAIVED = "Waived by";
+exports.WAIVE_COMMAND = /^@review\s+waive\b\s*([\s\S]*)$/i;
+// The title line inline comments open with, after any snapping note.
+const RAISED_TITLE = /(?:^|\n)(?:🔴|🟠|🟡|🔵|🟢) (?:CRITICAL|HIGH|MEDIUM|LOW|INFO) \*\*(.+?)\*\*\n/;
+function raisedTitle(body) {
+    return String(body ?? "").match(RAISED_TITLE)?.[1];
+}
 function readPrompt(name) {
     return fs.readFileSync(path.join(__dirname, "prompts", name), "utf8").trim();
 }

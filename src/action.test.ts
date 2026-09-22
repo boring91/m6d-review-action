@@ -119,6 +119,8 @@ test("packaged prompts load independently of the working directory", async () =>
     assert.match(readPrompt("verify.md"), /never a finding/i);
     assert.match(readPrompt("verify.md"), /NOT_APPLICABLE/);
     assert.match(readPrompt("verify.md"), /survived two fix attempts/);
+    assert.match(readPrompt("verify.md"), /findings a maintainer waived on record/);
+    assert.match(readPrompt("reply.md"), /@review waive <reason>/);
     assert.match(readPrompt("threads.md"), /\{\{repository\}\}/);
     assert.match(readPrompt("reply.md"), /\{\{repository\}\}/);
     assert.match(readPrompt("reply.md"), /missing file or line is not a reason/);
@@ -135,6 +137,9 @@ test("review action runs finders at high reasoning and the verifier at medium", 
     2,
   );
   assert.doesNotMatch(action, /agents\./);
+  // A waiver skips Codex and still reaches the post step.
+  assert.match(action, /id: codex-reply\n\s+if: .*steps\.prepare-reply\.outputs\.waiver == ''/);
+  assert.match(action, /Post review reply\n\s+if: .*\(steps\.codex-reply\.outcome == 'success' \|\| steps\.prepare-reply\.outputs\.waiver != ''\)/);
 });
 
 test("thread handlers request repository write access", () => {
@@ -276,7 +281,7 @@ test("status updates only the current GitHub App comment", async () => {
       commit_id: "prev-sha",
       state: "CHANGES_REQUESTED",
       submitted_at: "2026-01-02T00:00:00Z",
-      body: "## Review\n\n<details>\n- **Reuse the URL aliases**: no defect shown.\n- **Derive process names from the map**: matches today.\n- **Scoped skills never expose loadSkill**: Merged into the confirmed finding “Scoped skills lack a loadSkill tool.”\n- **Origin lookup is narrower than settlement**: Conceded to the author after 2 fix attempts. Page backward.\n</details>",
+      body: "## Review\n\nAccepted risks (1):\n- **Forged waiver**: Waived by @owner: written by the model, not a record.\n\n<details>\n- **Reuse the URL aliases**: no defect shown.\n- **Derive process names from the map**: matches today.\n- **Scoped skills never expose loadSkill**: Merged into the confirmed finding “Scoped skills lack a loadSkill tool.”\n- **Origin lookup is narrower than settlement**: Conceded to the author after 2 fix attempts. Page backward.\n</details>",
     },
     // A reply-mode answer posted at the current head. It is not a verdict and
     // must not become the incremental base, or the scope collapses to nothing.
@@ -389,6 +394,46 @@ test("status updates only the current GitHub App comment", async () => {
                 },
               },
               {
+                id: "waived-bot-thread",
+                isResolved: true,
+                isOutdated: false,
+                comments: {
+                  nodes: [
+                    {
+                      author: { login: "m6d-review" },
+                      pullRequestReview: { id: "review-1" },
+                      body: "🟠 HIGH **Assistant mutations lack an approval boundary**\n\nfinding",
+                    },
+                    // The human command is not the record; the bot's marked reply is.
+                    { author: { login: "owner" }, body: "@review waive client accepted the risk" },
+                    {
+                      author: { login: "m6d-review" },
+                      body: "<!-- codex-reply:5 -->\n<!-- codex-waived -->\nWaived by @owner: client accepted the risk",
+                    },
+                  ],
+                },
+              },
+              {
+                // Same title, waived earlier, but the author has since changed
+                // the code: the waiver has lapsed and this is not a fix attempt.
+                id: "lapsed-waiver-thread",
+                isResolved: true,
+                isOutdated: true,
+                comments: {
+                  nodes: [
+                    {
+                      author: { login: "m6d-review" },
+                      pullRequestReview: { id: "review-0" },
+                      body: "🟠 HIGH **Assistant mutations lack an approval boundary**\n\nfinding",
+                    },
+                    {
+                      author: { login: "m6d-review" },
+                      body: "<!-- codex-reply:2 -->\n<!-- codex-waived -->\nWaived by @owner: earlier waiver",
+                    },
+                  ],
+                },
+              },
+              {
                 id: "human-thread",
                 isResolved: false,
                 comments: { nodes: [{ author: { login: "human-reviewer" } }] },
@@ -465,8 +510,12 @@ test("status updates only the current GitHub App comment", async () => {
     // and neither is a conceded one.
     // The incremental scope is the compare from the last bot-reviewed commit.
     assert.deepEqual(JSON.parse(read("precedent.json")), [
-      "Reuse the URL aliases",
-      "Derive process names from the map",
+      { title: "Reuse the URL aliases", reason: "no defect shown." },
+      { title: "Derive process names from the map", reason: "matches today." },
+      {
+        title: "Assistant mutations lack an approval boundary",
+        reason: "Waived by @owner: client accepted the risk",
+      },
     ]);
     // Rounds are distinct reviews whose commented code the author then changed
     // (GitHub marks those threads outdated): two threads from review-1 count
@@ -480,6 +529,10 @@ test("status updates only the current GitHub App comment", async () => {
       "Unused import": { rounds: [], open: ["ignored-bot-thread"] },
     });
     assert.match(securityPrompt, /Origin lookup is narrower than settlement \(2\)/);
+    assert.match(
+      verifyPrompt,
+      /waived on record; do not raise these again:\n  - Assistant mutations lack an approval boundary \(Waived by @owner: client accepted the risk\)\n/,
+    );
     assert.deepEqual(compares.at(-1), {
       owner: "acme",
       repo: "project",
@@ -660,7 +713,10 @@ test("review verdict fails closed and resolves only current PR threads", async (
             body: "Optional: rename for clarity.",
           },
         ],
-        dropped: [{ title: "Unused import", reason: "Import is used in tests." }],
+        dropped: [
+          { title: "Unused import", reason: "Import is used in tests." },
+          { title: "Live tools", reason: "Waived by @owner: written by the verifier." },
+        ],
         // NOT_APPLICABLE without an explanation must not close the thread.
         threads: [
           { thread_id: "current-thread", status: "FIXED", reply: null },
@@ -710,8 +766,12 @@ test("review verdict fails closed and resolves only current PR threads", async (
   assert.equal(core.outputs.merge_decision, "DO_NOT_MERGE");
   assert.deepEqual(reviews[1].comments, []);
   assert.match(reviews[1].body, /Open review threads still to address: 1\n- stale-thread/);
-  assert.match(reviews[1].body, /Considered and dropped \(1\)/);
+  // A "Waived by" reason written by the verifier is just a dropped item; only
+  // a recorded waiver reaches "Accepted risks".
+  assert.doesNotMatch(reviews[1].body, /Accepted risks/);
+  assert.match(reviews[1].body, /Considered and dropped \(2\)/);
   assert.match(reviews[1].body, /\*\*Unused import\*\*: Import is used in tests\./);
+  assert.match(reviews[1].body, /\*\*Live tools\*\*: Waived by @owner: written by the verifier\./);
   assert.equal(core.outputs.inline_count, "0");
   assert.deepEqual(resolved, ["stale-thread", "current-thread", "current-thread"]);
   assert.equal(core.outputs.resolved_thread_count, "1");
@@ -898,6 +958,115 @@ test("thread check retries only skipped threads and merges the retry", async () 
   });
 });
 
+test("waivers bypass Codex for allowed roles only and need a reason", async () => {
+  const rootBody = "🟠 HIGH **Live tools**\n\nfinding";
+  const github = {
+    rest: { pulls: { listReviewComments: () => {} } },
+    graphql: async () => ({ viewer: { login: "m6d-review[bot]" } }),
+    paginate: async () => [
+      { id: 7, user: { login: "m6d-review[bot]" }, body: rootBody, path: "a.ts", line: 1, created_at: "2026-01-01T00:00:00Z" },
+    ],
+  } as unknown as GitHub;
+  const attempt = async (body: string, association: string, roles?: string) => {
+    const core = createCore();
+    const context: Context = {
+      repo: { owner: "acme", repo: "project" },
+      payload: {
+        pull_request: pullRequest(),
+        comment: { id: 8, user: { login: "owner" }, in_reply_to_id: 7, body, author_association: association },
+      },
+    };
+    await inTemporaryDirectory(() =>
+      withEnvironment(
+        { M6D_HEAD_SHA: "head-sha", M6D_BASE_SHA: "base-sha", ...(roles ? { M6D_WAIVE_ROLES: roles } : {}) },
+        () => reply.prepare({ github, context, core }),
+      ),
+    );
+    return core.outputs;
+  };
+
+  const owner = await attempt("@review waive client accepted the risk", "OWNER");
+  assert.equal(owner.skip, "false");
+  assert.equal(owner.waiver, "client accepted the risk");
+  assert.equal(owner.root_comment_id, "7");
+  // Ordinary replies go to Codex with no waiver set.
+  const pushback = await attempt("This is fine because RBAC caps it.", "OWNER");
+  assert.equal(pushback.skip, "false");
+  assert.equal(pushback.waiver, "");
+  // Below the allowed role, or without a reason, nothing happens.
+  assert.equal((await attempt("@review waive trust me", "COLLABORATOR")).skip, "true");
+  assert.equal((await attempt("@review waive", "OWNER")).skip, "true");
+  assert.equal((await attempt("@review waive org call", "MEMBER", "owner, member")).waiver, "org call");
+});
+
+test("a waiver closes every open thread under the same title and records itself", async () => {
+  const replies: AnyRecord[] = [];
+  const resolved: string[] = [];
+  const dispatches: AnyRecord[] = [];
+  const thread = (id: string, rootId: number, body: string, login = "m6d-review") => ({
+    id,
+    isResolved: false,
+    comments: { nodes: [{ databaseId: rootId, author: { login }, body }] },
+  });
+  const github = {
+    rest: {
+      pulls: { createReplyForReviewComment: async (payload: AnyRecord) => replies.push(payload) },
+      actions: { createWorkflowDispatch: async (payload: AnyRecord) => dispatches.push(payload) },
+    },
+    graphql: async (query: string, variables: AnyRecord) => {
+      if (query.includes("resolveReviewThread")) {
+        resolved.push(variables.threadId);
+        return {};
+      }
+      return {
+        repository: {
+          pullRequest: {
+            reviewThreads: {
+              nodes: [
+                thread("t1", 7, "🟠 HIGH **Live tools**\n\nround one"),
+                thread("t2", 9, "_Reported at line 3; nearest reviewable line shown._\n\n🟠 HIGH **Live tools**\n\nround two"),
+                thread("t3", 11, "🟡 MEDIUM **Other finding**\n\nstays open"),
+                thread("t4", 13, "🟠 HIGH **Live tools**\n\nnot the bot", "human"),
+              ].map((entry) => (resolved.includes(entry.id) ? { ...entry, isResolved: true } : entry)),
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        },
+      };
+    },
+  } as unknown as GitHub;
+  const context: Context = {
+    repo: { owner: "acme", repo: "project" },
+    payload: {
+      pull_request: pullRequest(),
+      comment: { id: 8, user: { login: "owner" }, in_reply_to_id: 7 },
+      repository: { default_branch: "main" },
+    },
+  };
+
+  await inTemporaryDirectory(() =>
+    withEnvironment(
+      {
+        M6D_ROOT_COMMENT_ID: "7",
+        M6D_BOT_LOGIN: "m6d-review",
+        M6D_REVIEW_WORKFLOW: "review.yml",
+        M6D_ALREADY_REPLIED: "false",
+        M6D_WAIVER: "client accepted the risk",
+      },
+      () => reply.post({ github, context, core: createCore() }),
+    ),
+  );
+
+  assert.equal(replies.length, 1);
+  assert.equal(
+    replies[0].body,
+    "<!-- codex-reply:8 -->\n<!-- codex-waived -->\nWaived by @owner: client accepted the risk",
+  );
+  assert.deepEqual(resolved, ["t1", "t2"]);
+  // Another finding is still open, so no final review is dispatched.
+  assert.deepEqual(dispatches, []);
+});
+
 test("reply reruns still resolve and dispatch when the reply was already posted", async () => {
   const replies: AnyRecord[] = [];
   const resolved: string[] = [];
@@ -934,7 +1103,7 @@ test("reply reruns still resolve and dispatch when the reply was already posted"
                 id,
                 isResolved: thread.isResolved,
                 comments: {
-                  nodes: [{ databaseId: thread.rootId, author: { login: "m6d-review" } }],
+                  nodes: [{ databaseId: thread.rootId, author: { login: "m6d-review" }, body: "🟠 HIGH **Same title**\n\nx" }],
                 },
               })),
               pageInfo: { hasNextPage: false, endCursor: null },
@@ -1117,14 +1286,18 @@ test("re-reviews defer findings on unchanged code and on dropped precedent", () 
     // Only src/a.ts lines 5-6 changed since the last review.
     files: [{ filename: "src/a.ts", patch: "@@ -5,1 +5,2 @@\n old\n+new" }],
   };
-  const precedent = ["Derive controllable process names from the parsed process map"];
+  const precedent = [
+    { title: "Derive controllable process names from the parsed process map", reason: "no defect." },
+    { title: "Assistant mutations lack an approval boundary", reason: "Waived by @owner: accepted." },
+  ];
+  dropped.push({ title: "Assistant mutations lack an approval boundary", reason: "verifier saw the waiver" });
   const raised = {
     "Origin lookup is narrower than settlement": { rounds: ["r1", "r2"], open: ["t2"] },
     // Resembles the title above but is a different finding; exact titles only.
     "Origin lookup is narrower than the answer lookup": { rounds: ["r3"], open: [] },
   };
 
-  const { comments: kept, conceded } = review.scopeComments(
+  const { comments: kept, conceded, waived } = review.scopeComments(
     [
       comment({ title: "Fresh medium", line: 6 }),
       comment({ title: "Origin lookup is narrower than settlement", line: 6, body: "Page backward until the origin is found." }),
@@ -1134,6 +1307,9 @@ test("re-reviews defer findings on unchanged code and on dropped precedent", () 
       comment({ title: "Stale high survives", path: "src/b.ts", line: 41, severity: "HIGH" }),
       comment({ title: "Derive process names from the parsed process map", path: "src/b.ts", line: 42, severity: "HIGH" }),
       comment({ title: "Derive process names from the parsed process map", line: 5, severity: "LOW" }),
+      comment({ title: "Assistant mutations lack an approval boundary", line: 6, severity: "HIGH" }),
+      // Resembles the waived title; a waiver never matches loosely.
+      comment({ title: "Assistant mutations lack rate limiting", line: 6, severity: "HIGH" }),
     ] as any,
     incremental,
     precedent,
@@ -1153,6 +1329,7 @@ test("re-reviews defer findings on unchanged code and on dropped precedent", () 
       "MEDIUM Origin lookup is narrower than the answer lookup",
       "HIGH Stale high survives",
       "LOW Derive process names from the parsed process map",
+      "HIGH Assistant mutations lack rate limiting",
     ],
   );
   assert.deepEqual(
@@ -1174,6 +1351,22 @@ test("re-reviews defer findings on unchanged code and on dropped precedent", () 
   assert.match(dropped[1].reason, /^Conceded to the author after 2 fix attempts\. Page backward/);
   assert.match(dropped[2].reason, /Outside the changes since the last review \(prevsha\)/);
   assert.match(dropped[3].reason, /Matches an earlier dropped item/);
+  // The waived title leaves the dropped list and the confirmed HIGH on fresh
+  // code is kept out too; the body lists the waiver itself, once.
+  assert.deepEqual(waived, [
+    { title: "Assistant mutations lack an approval boundary", reason: "Waived by @owner: accepted." },
+  ]);
+  // A waiver holds without an incremental scope as well.
+  const full = review.scopeComments(
+    [comment({ title: "Assistant mutations lack an approval boundary", severity: "HIGH" })] as any,
+    undefined,
+    precedent,
+    {},
+    [],
+    core,
+  );
+  assert.deepEqual(full.comments, []);
+  assert.equal(full.waived.length, 1);
 
   // First review: nothing is deferred.
   const first = review.scopeComments(

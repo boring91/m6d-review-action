@@ -6,8 +6,12 @@ import {
   normalizeBotLogin,
   parseJson,
   quote,
+  raisedTitle,
   readPrompt,
   truncate,
+  WAIVE_COMMAND,
+  WAIVED,
+  WAIVED_MARKER,
 } from "./helpers.js";
 import type { HandlerOptions, PullRequest } from "./types.js";
 
@@ -27,7 +31,7 @@ type ReplyThread = {
   id: string;
   isResolved: boolean;
   comments: {
-    nodes: Array<{ databaseId: number; author?: { login: string } }>;
+    nodes: Array<{ databaseId: number; author?: { login: string }; body?: string }>;
   };
 };
 
@@ -154,6 +158,29 @@ export async function prepare({
     core.info("Reply already posted on an earlier run; re-evaluating without reposting.");
   }
   core.setOutput("already_replied", alreadyReplied ? "true" : "false");
+  core.setOutput("root_comment_id", String(rootId));
+  core.setOutput("bot_login", botLogin);
+
+  // A waiver never reaches Codex: the model's verdict cannot be argued down,
+  // only overridden on record by a role the consumer trusts to accept risk.
+  const waive = String(triggerComment.body ?? "").trim().match(WAIVE_COMMAND);
+  if (waive) {
+    // One line: the review body records it as `- **title**: reason` later.
+    const reason = waive[1].replace(/\s+/g, " ").trim();
+    const roles = (process.env.M6D_WAIVE_ROLES || "OWNER")
+      .split(",")
+      .map((role) => role.trim().toUpperCase());
+    if (!reason) return skip("Waiver without a reason; skipping. Use `@review waive <reason>`.");
+    if (!roles.includes(String(triggerComment.author_association))) {
+      return skip(
+        `Waiver from ${triggerComment.author_association ?? "unknown"} ignored; allowed roles: ${roles.join(", ")}.`,
+      );
+    }
+    core.info(`Waiver by ${triggerComment.user.login}: ${reason}`);
+    core.setOutput("skip", "false");
+    core.setOutput("waiver", reason);
+    return;
+  }
 
   const path = root.path ?? triggerComment.path ?? "unknown";
   const line =
@@ -262,8 +289,7 @@ export async function prepare({
   );
 
   core.setOutput("skip", "false");
-  core.setOutput("root_comment_id", String(rootId));
-  core.setOutput("bot_login", botLogin);
+  core.setOutput("waiver", "");
 }
 
 export async function post({
@@ -281,10 +307,19 @@ export async function post({
   const rootId = Number(process.env.M6D_ROOT_COMMENT_ID);
   const botLogin = normalizeBotLogin(process.env.M6D_BOT_LOGIN);
   const triggerId = triggerComment.id;
-  const result = parseJson<ReplyResult>(
-    fs.readFileSync(".codex/reply.json", "utf8").trim(),
-    "Codex reply output",
-  );
+  const waiver = process.env.M6D_WAIVER || "";
+  const result: ReplyResult = waiver
+    ? {
+        evaluation_completed: true,
+        should_respond: true,
+        assessment: "RESOLVED",
+        reply_markdown: `${WAIVED} @${triggerComment.user.login}: ${waiver}`,
+        reason: null,
+      }
+    : parseJson<ReplyResult>(
+        fs.readFileSync(".codex/reply.json", "utf8").trim(),
+        "Codex reply output",
+      );
 
   if (result.evaluation_completed !== true) {
     throw new Error(
@@ -294,7 +329,8 @@ export async function post({
 
   const assessment = result.assessment;
   const agreed = assessment === "RESOLVED";
-  const text = String(result.reply_markdown || "").trim();
+  // Codex text is untrusted: only this run may stamp a reply as a waiver.
+  const text = String(result.reply_markdown || "").replaceAll(WAIVED_MARKER, "").trim();
   const reply =
     text || (agreed ? "Agreed, this looks addressed. Resolving this thread." : "");
 
@@ -306,7 +342,7 @@ export async function post({
       repo,
       pull_number: pullNumber,
       comment_id: rootId,
-      body: `<!-- codex-reply:${triggerId} -->\n${reply}`,
+      body: `<!-- codex-reply:${triggerId} -->\n${waiver ? `${WAIVED_MARKER}\n` : ""}${reply}`,
     });
     core.info(`Posted reply (assessment=${assessment}).`);
   } else {
@@ -330,7 +366,7 @@ export async function post({
                 id
                 isResolved
                 comments(first: 1) {
-                  nodes { databaseId author { login } }
+                  nodes { databaseId author { login } body }
                 }
               }
               pageInfo { hasNextPage endCursor }
@@ -359,7 +395,8 @@ export async function post({
     return threads;
   };
 
-  const target = (await listThreads()).find(
+  const threads = await listThreads();
+  const target = threads.find(
     (thread) => thread.comments.nodes[0]?.databaseId === rootId,
   );
   if (!target) {
@@ -368,12 +405,23 @@ export async function post({
     );
     return;
   }
-  if (!target.isResolved) {
+  // A waiver covers the finding, not one thread: a re-raised finding owns one
+  // bot thread per round, so every open sibling under the same title closes too.
+  const title = waiver ? raisedTitle(target.comments.nodes[0]?.body) : undefined;
+  const closing = threads.filter(
+    (thread) =>
+      !thread.isResolved &&
+      (thread.id === target.id ||
+        (title !== undefined &&
+          normalizeBotLogin(thread.comments.nodes[0]?.author?.login) === botLogin &&
+          raisedTitle(thread.comments.nodes[0]?.body) === title)),
+  );
+  for (const thread of closing) {
     await github.graphql(
       "mutation($threadId: ID!) { resolveReviewThread(input: {threadId: $threadId}) { thread { id isResolved } } }",
-      { threadId: target.id },
+      { threadId: thread.id },
     );
-    core.info(`Resolved thread ${target.id}.`);
+    core.info(`Resolved thread ${thread.id}.`);
   }
 
   if (!botLogin) {
