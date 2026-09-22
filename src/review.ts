@@ -5,8 +5,11 @@ import {
   normalizeBotLogin,
   parseJson,
   quote,
+  raisedTitle,
   readPrompt,
   truncate,
+  WAIVED,
+  WAIVED_MARKER,
 } from "./helpers.js";
 import type { Core, GitHub, HandlerOptions, PullRequest } from "./types.js";
 
@@ -102,10 +105,15 @@ type Incremental = {
   files: Array<{ filename: string; patch?: string | null }>;
 };
 
-// Titles of every candidate an earlier round listed under "Considered and
-// dropped". A later round may not re-raise one unless the code it sits on
-// changed since that decision.
+// Every candidate an earlier round listed under "Considered and dropped", with
+// its reason, plus every finding a maintainer waived. A dropped title may not
+// be re-raised unless the code it sits on changed since the last review. A
+// waiver is recorded only from the bot's own marked reply on a thread GitHub
+// still shows as current, so it lapses on its own once the commented code
+// changes; while it holds, the exact title is kept out of the review in every
+// scope and listed under "Accepted risks" with the maintainer's reason.
 const PRECEDENT_FILE = ".codex/precedent.json";
+type Precedent = { title: string; reason: string };
 
 // Every inline comment earlier rounds posted, keyed by its title: the reviews
 // (rounds) that raised it and the author then changed the code under, and the
@@ -121,8 +129,6 @@ type Raised = Record<string, { rounds: string[]; open: string[] }>;
 type ResolveEntry = { id: string; reply?: string };
 const CONCEDED = "Conceded to the author";
 const LABEL = /^(?:🔴|🟠|🟡|🔵|🟢) (?:CRITICAL|HIGH|MEDIUM|LOW|INFO)\s*/;
-// The title line commentBody writes, after any snapping note.
-const RAISED_TITLE = /(?:^|\n)(?:🔴|🟠|🟡|🔵|🟢) (?:CRITICAL|HIGH|MEDIUM|LOW|INFO) \*\*(.+?)\*\*\n/;
 
 // One spelling of a title for the comment header and the raised lookup.
 function findingTitle(value: unknown): string {
@@ -591,18 +597,40 @@ export async function prepare({
   // its wording later could suppress that finding's own follow-ups.
   // A conceded finding is not precedent either: the reviewer still believed
   // it, so a later HIGH on the same code must not be silenced by it.
-  const precedent = botReviews.flatMap((review) =>
+  // Review bodies are model-written, so a "Waived by" line there is never a
+  // waiver; only the marked thread reply below is.
+  const precedent: Precedent[] = botReviews.flatMap((review) =>
     [...String(review.body ?? "").matchAll(/^- \*\*(.+?)\*\*: (.*)$/gm)]
       .filter((match) => !/^merged (into|with)\b/i.test(match[2]))
       .filter((match) => !match[2].startsWith(CONCEDED))
-      .map((match) => match[1]),
+      .filter((match) => !match[2].startsWith(WAIVED))
+      .map((match) => ({ title: match[1], reason: match[2] })),
   );
   const raised: Raised = {};
   for (const thread of threads) {
     const first = thread.comments.nodes[0];
     if (normalizeBotLogin(first?.author?.login) !== appLogin) continue;
-    const title = String(first?.body ?? "").match(RAISED_TITLE)?.[1];
+    const title = raisedTitle(first?.body);
     if (!title) continue;
+    const waiver = thread.comments.nodes.find(
+      (comment) =>
+        normalizeBotLogin(comment.author?.login) === appLogin &&
+        comment.body?.includes(WAIVED_MARKER),
+    );
+    if (waiver) {
+      // Outdated means the author changed the commented code after the
+      // waiver, which ends it. A waived thread is not a fix attempt either.
+      const recorded = precedent.some(
+        (entry) => entry.title === title && entry.reason.startsWith(WAIVED),
+      );
+      if (!thread.isOutdated && !recorded) {
+        precedent.push({
+          title,
+          reason: String(waiver.body).replace(/<!--.*?-->\n?/g, "").trim(),
+        });
+      }
+      continue;
+    }
     const entry = (raised[title] ??= { rounds: [], open: [] });
     const round = first?.pullRequestReview?.id ?? thread.id;
     // GitHub marks a thread outdated once the lines it sits on change, which
@@ -644,6 +672,14 @@ export async function prepare({
       ? [
           "- Findings already posted inline in earlier rounds, with the number of fix attempts since:",
           ...Object.entries(raised).map(([title, { rounds }]) => `  - ${title} (${rounds.length})`),
+        ]
+      : []),
+    ...(precedent.some((entry) => entry.reason.startsWith(WAIVED))
+      ? [
+          "- Findings a maintainer waived on record; do not raise these again:",
+          ...precedent
+            .filter((entry) => entry.reason.startsWith(WAIVED))
+            .map((entry) => `  - ${entry.title} (${entry.reason})`),
         ]
       : []),
     "",
@@ -977,7 +1013,8 @@ async function resolveThreads(
             repo,
             pull_number: pullNumber,
             comment_id: rootCommentId,
-            body: truncate(entry.reply, 2000),
+            // Verifier text is untrusted: only reply mode may stamp a waiver.
+            body: truncate(entry.reply.replaceAll(WAIVED_MARKER, ""), 2000),
           });
         }
         await github.graphql(
@@ -1021,15 +1058,26 @@ export function similarTitles(left: string, right: string): number {
 // body as the closing reply; a finding on code untouched since the last review
 // is deferred unless it is HIGH or CRITICAL; a finding matching an earlier
 // dropped title is deferred unless its code changed since. Deferred findings
-// are appended to `dropped` so they stay visible without blocking.
+// are appended to `dropped` so they stay visible without blocking. A finding
+// under a waived title, whether the verifier confirmed or dropped it, is
+// returned as `waived` with the maintainer's reason instead; exact titles
+// only, since a waiver is a person signing off on one specific finding.
 export function scopeComments(
   comments: ModelComment[],
   incremental: Incremental | undefined,
-  precedent: string[],
+  precedent: Precedent[],
   raised: Raised,
   dropped: Array<{ title: string; reason: string }>,
   core: Core,
-): { comments: ModelComment[]; conceded: ResolveEntry[] } {
+): { comments: ModelComment[]; conceded: ResolveEntry[]; waived: Precedent[] } {
+  // Every active waiver is listed, whether or not the verifier raised it
+  // again, so the review body always shows what stands accepted.
+  const waived = precedent.filter((entry) => entry.reason.startsWith(WAIVED));
+  const waiverFor = (title: string) =>
+    waived.find((entry) => entry.title === findingTitle(title));
+  for (const entry of [...dropped]) {
+    if (waiverFor(entry.title)) dropped.splice(dropped.indexOf(entry), 1);
+  }
   const defer = (comment: ModelComment, reason: string) => {
     core.info(`Deferred ${comment.severity} "${comment.title}" at ${comment.path}:${comment.line}: ${reason}`);
     dropped.push({ title: comment.title, reason });
@@ -1039,6 +1087,11 @@ export function scopeComments(
     comment.severity === "HIGH" || comment.severity === "CRITICAL";
   const conceded: ResolveEntry[] = [];
   const capped = comments.filter((comment) => {
+    const waiver = waiverFor(comment.title);
+    if (waiver) {
+      core.info(`Waived ${comment.severity} "${comment.title}" at ${comment.path}:${comment.line}: ${waiver.reason}`);
+      return false;
+    }
     const earlier = raised[findingTitle(comment.title)];
     if (blocking(comment) || !earlier || earlier.rounds.length < RAISED_LIMIT) return true;
     const invariant = truncate(comment.body, 1500).replace(/\s+/g, " ");
@@ -1046,7 +1099,7 @@ export function scopeComments(
     conceded.push(...earlier.open.map((id) => ({ id, reply })));
     return defer(comment, `${CONCEDED} after ${earlier.rounds.length} fix attempts. ${invariant}`);
   });
-  const scope = (kept: ModelComment[]) => ({ comments: kept, conceded });
+  const scope = (kept: ModelComment[]) => ({ comments: kept, conceded, waived });
   if (!incremental) return scope(capped);
   const changed = parseDiffLines(incremental.files);
   const previous = incremental.previous_head.slice(0, 7);
@@ -1056,9 +1109,9 @@ export function scopeComments(
       lines?.[comment.side === "LEFT" ? "LEFT" : "RIGHT"].has(Number(comment.line)),
     );
     if (fresh) return true;
-    const match = precedent.find((title) => similarTitles(title, comment.title) >= 0.6);
+    const match = precedent.find((entry) => similarTitles(entry.title, comment.title) >= 0.6);
     const reason = match
-      ? `Matches an earlier dropped item ("${truncate(match, 120)}") and its code has not changed since ${previous}.`
+      ? `Matches an earlier dropped item ("${truncate(match.title, 120)}") and its code has not changed since ${previous}.`
       : blocking(comment)
         ? undefined
         : `Outside the changes since the last review (${previous}); noted here rather than blocking this round.`;
@@ -1135,7 +1188,7 @@ export async function submit({
 
   const dropped = Array.isArray(review.dropped) ? [...review.dropped] : [];
   // INFO never blocks: it stays in the review body and is never posted inline.
-  const { comments, conceded } = scopeComments(
+  const { comments, conceded, waived } = scopeComments(
     (Array.isArray(review.comments) ? review.comments : []).filter(
       (comment) => comment.severity !== "INFO",
     ),
@@ -1143,7 +1196,7 @@ export async function submit({
       ? (JSON.parse(fs.readFileSync(INCREMENTAL_FILE, "utf8")) as Incremental)
       : undefined,
     fs.existsSync(PRECEDENT_FILE)
-      ? (JSON.parse(fs.readFileSync(PRECEDENT_FILE, "utf8")) as string[])
+      ? (JSON.parse(fs.readFileSync(PRECEDENT_FILE, "utf8")) as Precedent[])
       : [],
     fs.existsSync(RAISED_FILE)
       ? (JSON.parse(fs.readFileSync(RAISED_FILE, "utf8")) as Raised)
@@ -1213,6 +1266,12 @@ export async function submit({
       ...openThreads.map((entry) => `- ${entry.thread_id}`),
     ].join("\n");
   }
+  const listed = (entry: Precedent) =>
+    `- **${truncate(entry.title, 200)}**: ${truncate(entry.reason, 500)}`;
+  // Waived findings stay in plain sight; the rest fold into the details block.
+  if (waived.length > 0) {
+    body += ["", "", `Accepted risks (${waived.length}):`, ...waived.map(listed)].join("\n");
+  }
   if (dropped.length > 0) {
     body += [
       "",
@@ -1220,10 +1279,7 @@ export async function submit({
       "<details>",
       `<summary>Considered and dropped (${dropped.length})</summary>`,
       "",
-      ...dropped.map(
-        (entry) =>
-          `- **${truncate(entry.title, 200)}**: ${truncate(entry.reason, 500)}`,
-      ),
+      ...dropped.map(listed),
       "",
       "</details>",
     ].join("\n");

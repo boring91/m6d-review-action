@@ -132,6 +132,27 @@ async function prepare({ github, context, core, }) {
         core.info("Reply already posted on an earlier run; re-evaluating without reposting.");
     }
     core.setOutput("already_replied", alreadyReplied ? "true" : "false");
+    core.setOutput("root_comment_id", String(rootId));
+    core.setOutput("bot_login", botLogin);
+    // A waiver never reaches Codex: the model's verdict cannot be argued down,
+    // only overridden on record by a role the consumer trusts to accept risk.
+    const waive = String(triggerComment.body ?? "").trim().match(helpers_js_1.WAIVE_COMMAND);
+    if (waive) {
+        // One line: the review body records it as `- **title**: reason` later.
+        const reason = waive[1].replace(/\s+/g, " ").trim();
+        const roles = (process.env.M6D_WAIVE_ROLES || "OWNER")
+            .split(",")
+            .map((role) => role.trim().toUpperCase());
+        if (!reason)
+            return skip("Waiver without a reason; skipping. Use `@review waive <reason>`.");
+        if (!roles.includes(String(triggerComment.author_association))) {
+            return skip(`Waiver from ${triggerComment.author_association ?? "unknown"} ignored; allowed roles: ${roles.join(", ")}.`);
+        }
+        core.info(`Waiver by ${triggerComment.user.login}: ${reason}`);
+        core.setOutput("skip", "false");
+        core.setOutput("waiver", reason);
+        return;
+    }
     const path = root.path ?? triggerComment.path ?? "unknown";
     const line = triggerComment.line ??
         triggerComment.original_line ??
@@ -210,8 +231,7 @@ async function prepare({ github, context, core, }) {
         "",
     ].join("\n"), "utf8");
     core.setOutput("skip", "false");
-    core.setOutput("root_comment_id", String(rootId));
-    core.setOutput("bot_login", botLogin);
+    core.setOutput("waiver", "");
 }
 async function post({ github, context, core, }) {
     const { owner, repo } = context.repo;
@@ -224,13 +244,23 @@ async function post({ github, context, core, }) {
     const rootId = Number(process.env.M6D_ROOT_COMMENT_ID);
     const botLogin = (0, helpers_js_1.normalizeBotLogin)(process.env.M6D_BOT_LOGIN);
     const triggerId = triggerComment.id;
-    const result = (0, helpers_js_1.parseJson)(fs.readFileSync(".codex/reply.json", "utf8").trim(), "Codex reply output");
+    const waiver = process.env.M6D_WAIVER || "";
+    const result = waiver
+        ? {
+            evaluation_completed: true,
+            should_respond: true,
+            assessment: "RESOLVED",
+            reply_markdown: `${helpers_js_1.WAIVED} @${triggerComment.user.login}: ${waiver}`,
+            reason: null,
+        }
+        : (0, helpers_js_1.parseJson)(fs.readFileSync(".codex/reply.json", "utf8").trim(), "Codex reply output");
     if (result.evaluation_completed !== true) {
         throw new Error(`Codex could not evaluate the reply: ${result.reason || "unknown reason"}`);
     }
     const assessment = result.assessment;
     const agreed = assessment === "RESOLVED";
-    const text = String(result.reply_markdown || "").trim();
+    // Codex text is untrusted: only this run may stamp a reply as a waiver.
+    const text = String(result.reply_markdown || "").replaceAll(helpers_js_1.WAIVED_MARKER, "").trim();
     const reply = text || (agreed ? "Agreed, this looks addressed. Resolving this thread." : "");
     if (process.env.M6D_ALREADY_REPLIED === "true") {
         core.info("Reply already posted on an earlier run; not reposting.");
@@ -241,7 +271,7 @@ async function post({ github, context, core, }) {
             repo,
             pull_number: pullNumber,
             comment_id: rootId,
-            body: `<!-- codex-reply:${triggerId} -->\n${reply}`,
+            body: `<!-- codex-reply:${triggerId} -->\n${waiver ? `${helpers_js_1.WAIVED_MARKER}\n` : ""}${reply}`,
         });
         core.info(`Posted reply (assessment=${assessment}).`);
     }
@@ -262,7 +292,7 @@ async function post({ github, context, core, }) {
                 id
                 isResolved
                 comments(first: 1) {
-                  nodes { databaseId author { login } }
+                  nodes { databaseId author { login } body }
                 }
               }
               pageInfo { hasNextPage endCursor }
@@ -287,14 +317,23 @@ async function post({ github, context, core, }) {
         } while (cursor);
         return threads;
     };
-    const target = (await listThreads()).find((thread) => thread.comments.nodes[0]?.databaseId === rootId);
+    const threads = await listThreads();
+    const target = threads.find((thread) => thread.comments.nodes[0]?.databaseId === rootId);
     if (!target) {
         core.warning(`Could not locate review thread for comment ${rootId}; skipping resolve.`);
         return;
     }
-    if (!target.isResolved) {
-        await github.graphql("mutation($threadId: ID!) { resolveReviewThread(input: {threadId: $threadId}) { thread { id isResolved } } }", { threadId: target.id });
-        core.info(`Resolved thread ${target.id}.`);
+    // A waiver covers the finding, not one thread: a re-raised finding owns one
+    // bot thread per round, so every open sibling under the same title closes too.
+    const title = waiver ? (0, helpers_js_1.raisedTitle)(target.comments.nodes[0]?.body) : undefined;
+    const closing = threads.filter((thread) => !thread.isResolved &&
+        (thread.id === target.id ||
+            (title !== undefined &&
+                (0, helpers_js_1.normalizeBotLogin)(thread.comments.nodes[0]?.author?.login) === botLogin &&
+                (0, helpers_js_1.raisedTitle)(thread.comments.nodes[0]?.body) === title)));
+    for (const thread of closing) {
+        await github.graphql("mutation($threadId: ID!) { resolveReviewThread(input: {threadId: $threadId}) { thread { id isResolved } } }", { threadId: thread.id });
+        core.info(`Resolved thread ${thread.id}.`);
     }
     if (!botLogin) {
         core.warning("Bot identity unknown; skipping the final-review check.");

@@ -3,6 +3,20 @@ import * as path from "node:path";
 
 const TRUSTED_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 
+// A maintainer closes a finding without fixing it by replying
+// `@review waive <reason>` in its thread. The bot's closing reply carries this
+// marker and opens with WAIVED, and later rounds treat that title as precedent.
+export const WAIVED_MARKER = "<!-- codex-waived -->";
+export const WAIVED = "Waived by";
+export const WAIVE_COMMAND = /^@review\s+waive\b\s*([\s\S]*)$/i;
+
+// The title line inline comments open with, after any snapping note.
+const RAISED_TITLE = /(?:^|\n)(?:🔴|🟠|🟡|🔵|🟢) (?:CRITICAL|HIGH|MEDIUM|LOW|INFO) \*\*(.+?)\*\*\n/;
+
+export function raisedTitle(body: unknown): string | undefined {
+  return String(body ?? "").match(RAISED_TITLE)?.[1];
+}
+
 export function readPrompt(name: string): string {
   return fs.readFileSync(path.join(__dirname, "prompts", name), "utf8").trim();
 }

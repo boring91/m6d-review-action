@@ -23,6 +23,10 @@ inputs:
     description: Workflow filename dispatched by @review and final thread resolution.
     required: false
     default: review.yml
+  waive-roles:
+    description: "Comma-separated author associations allowed to close a finding with `@review waive <reason>`. Use MEMBER for organisation-owned repositories."
+    required: false
+    default: OWNER
 
 runs:
   using: composite
@@ -281,6 +285,7 @@ runs:
         M6D_ACTION_PATH: ${{ github.action_path }}
         M6D_BASE_SHA: ${{ steps.reply-context.outputs.base_sha }}
         M6D_HEAD_SHA: ${{ steps.reply-context.outputs.head_sha }}
+        M6D_WAIVE_ROLES: ${{ inputs.waive-roles }}
       with:
         github-token: ${{ steps.reply-app-token.outputs.token }}
         script: |
@@ -289,7 +294,7 @@ runs:
 
     - name: Run Codex reply evaluation
       id: codex-reply
-      if: inputs.mode == 'reply' && steps.prepare-reply.outputs.skip != 'true'
+      if: inputs.mode == 'reply' && steps.prepare-reply.outputs.skip != 'true' && steps.prepare-reply.outputs.waiver == ''
       shell: bash
       run: |
         set -euo pipefail
@@ -297,11 +302,12 @@ runs:
         test -s .codex/reply.json
 
     - name: Post review reply
-      if: inputs.mode == 'reply' && steps.prepare-reply.outputs.skip != 'true' && steps.codex-reply.outcome == 'success'
+      if: inputs.mode == 'reply' && steps.prepare-reply.outputs.skip != 'true' && (steps.codex-reply.outcome == 'success' || steps.prepare-reply.outputs.waiver != '')
       uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
       env:
         M6D_ACTION_PATH: ${{ github.action_path }}
         M6D_ROOT_COMMENT_ID: ${{ steps.prepare-reply.outputs.root_comment_id }}
+        M6D_WAIVER: ${{ steps.prepare-reply.outputs.waiver }}
         M6D_ALREADY_REPLIED: ${{ steps.prepare-reply.outputs.already_replied }}
         M6D_BOT_LOGIN: ${{ steps.prepare-reply.outputs.bot_login }}
         M6D_REVIEW_WORKFLOW: ${{ inputs.review-workflow }}
