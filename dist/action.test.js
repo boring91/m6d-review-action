@@ -140,7 +140,7 @@ async function inTemporaryDirectory(run) {
     assert.match(action, /codex_review high \.codex\/candidates-schema\.json/);
     assert.match(action, /codex_review medium \.codex\/review-schema\.json/);
     // Thread retry and reply stay pinned at high.
-    assert.equal(action.match(/codex exec --model gpt-5\.6-sol -c 'model_reasoning_effort="high"' --ephemeral/g)?.length, 2);
+    assert.equal(action.match(/codex exec --model gpt-6\.1-sol -c 'model_reasoning_effort="high"' --ephemeral/g)?.length, 2);
     assert.doesNotMatch(action, /agents\./);
     // A waiver skips Codex and still reaches the post step.
     assert.match(action, /id: codex-reply\n\s+if: .*steps\.prepare-reply\.outputs\.waiver == ''/);

@@ -133,7 +133,7 @@ test("review action runs finders at high reasoning and the verifier at medium", 
   assert.match(action, /codex_review medium \.codex\/review-schema\.json/);
   // Thread retry and reply stay pinned at high.
   assert.equal(
-    action.match(/codex exec --model gpt-5\.6-sol -c 'model_reasoning_effort="high"' --ephemeral/g)?.length,
+    action.match(/codex exec --model gpt-6\.1-sol -c 'model_reasoning_effort="high"' --ephemeral/g)?.length,
     2,
   );
   assert.doesNotMatch(action, /agents\./);
