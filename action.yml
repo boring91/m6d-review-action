@@ -124,7 +124,7 @@ runs:
       run: |
         set -euo pipefail
         codex_review() {
-          codex exec --model gpt-5.6-sol -c "model_reasoning_effort=\"$1\"" --ephemeral -c 'approval_policy="never"' -c 'sandbox_mode="danger-full-access"' --output-schema "$2" -o "$3" - < "$4"
+          codex exec --model gpt-6.1-sol -c "model_reasoning_effort=\"$1\"" --ephemeral -c 'approval_policy="never"' -c 'sandbox_mode="danger-full-access"' --output-schema "$2" -o "$3" - < "$4"
           test -s "$3"
         }
         # Finder prompts were written by prepare: one for standard, four for
@@ -165,7 +165,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        codex exec --model gpt-5.6-sol -c 'model_reasoning_effort="high"' --ephemeral -c 'approval_policy="never"' -c 'sandbox_mode="danger-full-access"' --output-schema .codex/threads-schema.json -o .codex/threads.json - < .codex/threads-prompt.md
+        codex exec --model gpt-6.1-sol -c 'model_reasoning_effort="high"' --ephemeral -c 'approval_policy="never"' -c 'sandbox_mode="danger-full-access"' --output-schema .codex/threads-schema.json -o .codex/threads.json - < .codex/threads-prompt.md
         test -s .codex/threads.json
 
     - name: Submit pull-request review
@@ -298,7 +298,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        codex exec --model gpt-5.6-sol -c 'model_reasoning_effort="high"' --ephemeral -c 'approval_policy="never"' -c 'sandbox_mode="danger-full-access"' --output-schema .codex/reply-schema.json -o .codex/reply.json - < .codex/reply-prompt.md
+        codex exec --model gpt-6.1-sol -c 'model_reasoning_effort="high"' --ephemeral -c 'approval_policy="never"' -c 'sandbox_mode="danger-full-access"' --output-schema .codex/reply-schema.json -o .codex/reply.json - < .codex/reply-prompt.md
         test -s .codex/reply.json
 
     - name: Post review reply
