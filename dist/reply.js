@@ -40,9 +40,6 @@ const fs = __importStar(require("node:fs"));
 const helpers_js_1 = require("./helpers.js");
 async function validate({ github, context, core, }) {
     const comment = context.payload.comment;
-    const expectedRepo = `${context.repo.owner}/${context.repo.repo}`;
-    const expectedBase = process.env.M6D_BASE_BRANCH;
-    const problems = [];
     // The event payload is a snapshot from when the comment was written. Pushes
     // that landed since then would otherwise be evaluated against a stale head.
     const number = context.payload.pull_request?.number;
@@ -52,16 +49,7 @@ async function validate({ github, context, core, }) {
             pull_number: number,
         })).data
         : undefined;
-    if (pr?.state !== "open")
-        problems.push(`state is ${pr?.state}`);
-    if (pr?.draft)
-        problems.push("PR is a draft");
-    if (pr?.base?.ref !== expectedBase) {
-        problems.push(`base is ${pr?.base?.ref}, expected ${expectedBase}`);
-    }
-    if (pr?.head?.repo?.full_name !== expectedRepo) {
-        problems.push(`head repo is ${pr?.head?.repo?.full_name}, expected ${expectedRepo}`);
-    }
+    const problems = (0, helpers_js_1.pullRequestProblems)(pr, `${context.repo.owner}/${context.repo.repo}`, process.env.M6D_BASE_BRANCH);
     if (comment?.user?.type === "Bot")
         problems.push("comment author is a bot");
     if (!(0, helpers_js_1.isTrustedAssociation)(comment?.author_association)) {

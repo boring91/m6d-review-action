@@ -1,6 +1,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+import type { PullRequest } from "./types.js";
+
 const TRUSTED_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 
 // A maintainer closes a finding without fixing it by replying
@@ -64,4 +66,27 @@ export function normalizeBotLogin(value: unknown): string {
 
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+// Why a pull request must not be reviewed: not open, a draft, from another
+// repository, or landing on another branch. A stacked layer lands where its
+// stack does, so its own base may be the layer below.
+export function pullRequestProblems(
+  pr: PullRequest | undefined,
+  expectedRepo: string,
+  expectedBase: string | undefined,
+): string[] {
+  const problems = [];
+  const landsOn = pr?.stack?.base.ref ?? pr?.base?.ref;
+  if (pr?.state !== "open") problems.push(`state is ${pr?.state}`);
+  if (pr?.draft) problems.push("PR is a draft");
+  if (landsOn !== expectedBase) {
+    problems.push(`base is ${landsOn}, expected ${expectedBase}`);
+  }
+  if (pr?.head?.repo?.full_name !== expectedRepo) {
+    problems.push(
+      `head repo is ${pr?.head?.repo?.full_name}, expected ${expectedRepo}`,
+    );
+  }
+  return problems;
 }

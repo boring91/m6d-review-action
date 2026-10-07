@@ -4,6 +4,7 @@ import {
   errorMessage,
   normalizeBotLogin,
   parseJson,
+  pullRequestProblems,
   quote,
   raisedTitle,
   readPrompt,
@@ -150,21 +151,11 @@ export async function resolve({
         pull_number: Number(process.env.M6D_PR_NUMBER),
       })
     ).data as PullRequest;
-  const expectedRepo = `${owner}/${repo}`;
-  const expectedBase = process.env.M6D_BASE_BRANCH;
-  const problems = [];
-
-  if (pullRequest.state !== "open")
-    problems.push(`state is ${pullRequest.state}`);
-  if (pullRequest.draft) problems.push("PR is a draft");
-  if (pullRequest.base?.ref !== expectedBase) {
-    problems.push(`base is ${pullRequest.base?.ref}, expected ${expectedBase}`);
-  }
-  if (pullRequest.head?.repo?.full_name !== expectedRepo) {
-    problems.push(
-      `head repo is ${pullRequest.head?.repo?.full_name}, expected ${expectedRepo}`,
-    );
-  }
+  const problems = pullRequestProblems(
+    pullRequest,
+    `${owner}/${repo}`,
+    process.env.M6D_BASE_BRANCH,
+  );
   if (problems.length > 0) {
     core.setFailed(
       `Refusing to review PR #${pullRequest.number}: ${problems.join("; ")}.`,
@@ -174,6 +165,7 @@ export async function resolve({
 
   core.setOutput("number", String(pullRequest.number));
   core.setOutput("head_sha", pullRequest.head.sha);
+  // The PR's own base, so a stacked layer is reviewed against the layer below.
   core.setOutput("base_ref", pullRequest.base.ref);
   core.setOutput("base_sha", pullRequest.base.sha);
   core.setOutput("title", pullRequest.title ?? "");

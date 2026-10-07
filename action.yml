@@ -16,7 +16,7 @@ inputs:
     description: GitHub App private key.
     required: true
   base-branch:
-    description: Allowed pull-request base branch. Defaults to the repository default branch.
+    description: Branch a reviewed pull request must land on; a stacked layer lands where its stack does. Defaults to the repository default branch.
     required: false
     default: ""
   review-workflow:

@@ -33,6 +33,9 @@ export type PullRequest = {
     sha: string;
     repo: { full_name: string } | null;
   };
+  // Set while the PR is a layer of a GitHub stack. `base` is then the layer
+  // below, and `stack.base` the branch the whole stack lands on.
+  stack?: { base: { ref: string; sha: string } } | null;
 };
 
 export type Comment = {
