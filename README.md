@@ -34,7 +34,7 @@ jobs:
   review:
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event.pull_request.base.ref == 'develop' &&
+      ((github.event.pull_request.stack.base.ref || github.event.pull_request.base.ref) == 'develop' &&
       github.event.pull_request.draft == false &&
       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: self-hosted
@@ -114,7 +114,7 @@ jobs:
     if: >-
       github.event.pull_request.state == 'open' &&
       github.event.pull_request.draft == false &&
-      github.event.pull_request.base.ref == 'develop' &&
+      (github.event.pull_request.stack.base.ref || github.event.pull_request.base.ref) == 'develop' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.comment.user.type != 'Bot' &&
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
@@ -143,7 +143,7 @@ The full-review workflow must remain named `review.yml` because command and repl
 
 Contents write permission is required because GitHub gates review-thread resolution on repository write access, even when the token already has Pull requests write permission.
 
-The action rejects drafts, forked pull requests, closed pull requests, and pull requests targeting a branch other than `base-branch`. Only owners, members, and collaborators can trigger `@review` commands or review-reply evaluations. A command comment must consist of exactly `@review`; mentions inside longer text are ignored. Finders, thread retries, and replies use `gpt-6.1-sol` at `high` reasoning effort; the verifier runs at `medium`, which kept every `HIGH` and `MEDIUM` finding in testing at about half the wall time. Codex runs with `danger-full-access` and an approval policy of `never`.
+The action rejects drafts, forked pull requests, closed pull requests, and pull requests that do not land on `base-branch`. A layer of a [GitHub stack](https://docs.github.com/en/pull-requests/get-started/about-stacked-prs) targets the layer below it but lands where its stack does, so it is accepted and reviewed against the layer below, so each layer's review covers only its own diff. The workflow conditions above read the stack's base the same way. Only owners, members, and collaborators can trigger `@review` commands or review-reply evaluations. A command comment must consist of exactly `@review`; mentions inside longer text are ignored. Finders, thread retries, and replies use `gpt-6.1-sol` at `high` reasoning effort; the verifier runs at `medium`, which kept every `HIGH` and `MEDIUM` finding in testing at about half the wall time. Codex runs with `danger-full-access` and an approval policy of `never`.
 
 Use `@main` while developing. Pin production consumers to `@v1` or an exact commit SHA after verification.
 

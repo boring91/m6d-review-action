@@ -220,6 +220,61 @@ test("reply validation rejects untrusted authors and uses the live PR head", asy
   });
 });
 
+test("a stacked layer is reviewed against the layer below it", async () => {
+  // GitHub points a mid-stack PR at the layer below and names the branch the
+  // whole stack lands on in `stack.base`.
+  const layer = (trunk: string): PullRequest => ({
+    ...pullRequest(),
+    base: { ref: "layer-1", sha: "layer-1-sha" },
+    stack: { base: { ref: trunk, sha: "trunk-sha" } },
+  });
+  const contextFor = (pr: PullRequest): Context => ({
+    repo: { owner: "acme", repo: "project" },
+    payload: {
+      pull_request: pr,
+      comment: {
+        id: 8,
+        user: { login: "developer", type: "User" },
+        author_association: "OWNER",
+        in_reply_to_id: 7,
+      },
+    },
+  });
+  const githubFor = (pr: PullRequest) =>
+    ({
+      rest: { pulls: { get: async () => ({ data: pr }) } },
+    }) as unknown as GitHub;
+  const handle = (pr: PullRequest) => ({
+    github: githubFor(pr),
+    context: contextFor(pr),
+  });
+
+  await withEnvironment({ M6D_BASE_BRANCH: "main" }, async () => {
+    const stacked = createCore();
+    await review.resolve({ ...handle(layer("main")), core: stacked });
+    assert.deepEqual(stacked.failures, []);
+    assert.equal(stacked.outputs.base_ref, "layer-1");
+    assert.equal(stacked.outputs.base_sha, "layer-1-sha");
+
+    const replied = createCore();
+    await reply.validate({ ...handle(layer("main")), core: replied });
+    assert.equal(replied.outputs.skip, "false");
+    assert.equal(replied.outputs.base_ref, "layer-1");
+
+    const elsewhere = createCore();
+    await review.resolve({ ...handle(layer("prod")), core: elsewhere });
+    assert.match(elsewhere.failures[0] ?? "", /base is prod, expected main/);
+
+    const unstacked = createCore();
+    const orphan = {
+      ...pullRequest(),
+      base: { ref: "layer-1", sha: "layer-1-sha" },
+    };
+    await review.resolve({ ...handle(orphan), core: unstacked });
+    assert.match(unstacked.failures[0] ?? "", /base is layer-1, expected main/);
+  });
+});
+
 test("reply post fails loudly when Codex could not evaluate", async () => {
   const context: Context = {
     repo: { owner: "acme", repo: "project" },

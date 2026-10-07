@@ -215,6 +215,55 @@ async function inTemporaryDirectory(run) {
         assert.equal(closed.outputs.skip, "true");
     });
 });
+(0, node_test_1.test)("a stacked layer is reviewed against the layer below it", async () => {
+    // GitHub points a mid-stack PR at the layer below and names the branch the
+    // whole stack lands on in `stack.base`.
+    const layer = (trunk) => ({
+        ...pullRequest(),
+        base: { ref: "layer-1", sha: "layer-1-sha" },
+        stack: { base: { ref: trunk, sha: "trunk-sha" } },
+    });
+    const contextFor = (pr) => ({
+        repo: { owner: "acme", repo: "project" },
+        payload: {
+            pull_request: pr,
+            comment: {
+                id: 8,
+                user: { login: "developer", type: "User" },
+                author_association: "OWNER",
+                in_reply_to_id: 7,
+            },
+        },
+    });
+    const githubFor = (pr) => ({
+        rest: { pulls: { get: async () => ({ data: pr }) } },
+    });
+    const handle = (pr) => ({
+        github: githubFor(pr),
+        context: contextFor(pr),
+    });
+    await withEnvironment({ M6D_BASE_BRANCH: "main" }, async () => {
+        const stacked = createCore();
+        await review.resolve({ ...handle(layer("main")), core: stacked });
+        assert.deepEqual(stacked.failures, []);
+        assert.equal(stacked.outputs.base_ref, "layer-1");
+        assert.equal(stacked.outputs.base_sha, "layer-1-sha");
+        const replied = createCore();
+        await reply.validate({ ...handle(layer("main")), core: replied });
+        assert.equal(replied.outputs.skip, "false");
+        assert.equal(replied.outputs.base_ref, "layer-1");
+        const elsewhere = createCore();
+        await review.resolve({ ...handle(layer("prod")), core: elsewhere });
+        assert.match(elsewhere.failures[0] ?? "", /base is prod, expected main/);
+        const unstacked = createCore();
+        const orphan = {
+            ...pullRequest(),
+            base: { ref: "layer-1", sha: "layer-1-sha" },
+        };
+        await review.resolve({ ...handle(orphan), core: unstacked });
+        assert.match(unstacked.failures[0] ?? "", /base is layer-1, expected main/);
+    });
+});
 (0, node_test_1.test)("reply post fails loudly when Codex could not evaluate", async () => {
     const context = {
         repo: { owner: "acme", repo: "project" },
