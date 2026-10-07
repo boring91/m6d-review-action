@@ -16,7 +16,7 @@ name: Review
 on:
   pull_request:
     branches: [develop]
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, stacked]
   workflow_dispatch:
     inputs:
       pr_number:
