@@ -134,7 +134,7 @@ async function prepare({ github, context, core, }) {
         const roles = (process.env.M6D_WAIVE_ROLES || "OWNER")
             .split(",")
             .map((role) => role.trim().toUpperCase());
-        const login = String(triggerComment.user.login);
+        const login = triggerComment.user.login;
         if (!reason)
             return skip("Waiver without a reason; skipping. Use `@review waive <reason>`.");
         if (!roles.includes(String(triggerComment.author_association)) &&

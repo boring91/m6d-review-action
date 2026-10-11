@@ -1078,7 +1078,11 @@ test("waivers bypass Codex for code owners and allowed roles only and need a rea
       { id: 7, user: { login: "m6d-review[bot]" }, body: rootBody, path: "a.ts", line: 1, created_at: "2026-01-01T00:00:00Z" },
     ],
   } as unknown as GitHub;
-  const attempt = async (body: string, association: string, roles?: string, login = "owner") => {
+  const attempt = async (
+    body: string,
+    association: string,
+    { roles, login = "owner" }: { roles?: string; login?: string } = {},
+  ) => {
     const core = createCore();
     const context: Context = {
       repo: { owner: "acme", repo: "project" },
@@ -1090,7 +1094,6 @@ test("waivers bypass Codex for code owners and allowed roles only and need a rea
     await inTemporaryDirectory(async (directory) => {
       gitRepository(directory, {
         "base-sha": { ".github/CODEOWNERS": "* @omar\n" },
-        // A pull request cannot make its own author a code owner.
         "head-sha": { ".github/CODEOWNERS": "* @owner\n" },
       });
       await withEnvironment(
@@ -1114,12 +1117,13 @@ test("waivers bypass Codex for code owners and allowed roles only and need a rea
   const pushback = await attempt("This is fine because RBAC caps it.", "OWNER");
   assert.equal(pushback.skip, "false");
   assert.equal(pushback.waiver, "");
-  // Below the allowed role, or without a reason, nothing happens.
+  // Below the allowed role, or without a reason, nothing happens. Listing
+  // yourself in the pull request's own CODEOWNERS does not count.
   assert.equal((await attempt("@review waive trust me", "COLLABORATOR")).skip, "true");
   assert.equal((await attempt("@review waive", "OWNER")).skip, "true");
-  assert.equal((await attempt("@review waive org call", "MEMBER", "owner, member")).waiver, "org call");
-  // A code owner may waive whatever their role.
-  assert.equal((await attempt("@review waive client call", "COLLABORATOR", undefined, "Omar")).waiver, "client call");
+  assert.equal((await attempt("@review waive org call", "MEMBER", { roles: "owner, member" })).waiver, "org call");
+  // A code owner on the landing commit may waive whatever their role.
+  assert.equal((await attempt("@review waive client call", "COLLABORATOR", { login: "Omar" })).waiver, "client call");
 });
 
 test("reply mode applies the rules covering the thread's file", async () => {
