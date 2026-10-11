@@ -956,7 +956,7 @@ function gitRepository(directory, commits = { "base-sha": {}, "head-sha": {} }) 
         assert.equal(noRetry.outputs.retry, "false");
     });
 });
-(0, node_test_1.test)("waivers bypass Codex for allowed roles only and need a reason", async () => {
+(0, node_test_1.test)("waivers bypass Codex for code owners and allowed roles only and need a reason", async () => {
     const rootBody = "🟠 HIGH **Live tools**\n\nfinding";
     const github = {
         rest: { pulls: { listReviewComments: () => { } } },
@@ -965,17 +965,20 @@ function gitRepository(directory, commits = { "base-sha": {}, "head-sha": {} }) 
             { id: 7, user: { login: "m6d-review[bot]" }, body: rootBody, path: "a.ts", line: 1, created_at: "2026-01-01T00:00:00Z" },
         ],
     };
-    const attempt = async (body, association, roles) => {
+    const attempt = async (body, association, { roles, login = "owner" } = {}) => {
         const core = createCore();
         const context = {
             repo: { owner: "acme", repo: "project" },
             payload: {
                 pull_request: pullRequest(),
-                comment: { id: 8, user: { login: "owner" }, in_reply_to_id: 7, body, author_association: association },
+                comment: { id: 8, user: { login }, in_reply_to_id: 7, body, author_association: association },
             },
         };
         await inTemporaryDirectory(async (directory) => {
-            gitRepository(directory);
+            gitRepository(directory, {
+                "base-sha": { ".github/CODEOWNERS": "* @omar\n" },
+                "head-sha": { ".github/CODEOWNERS": "* @owner\n" },
+            });
             await withEnvironment({
                 M6D_HEAD_SHA: "head-sha",
                 M6D_BASE_SHA: "base-sha",
@@ -993,10 +996,13 @@ function gitRepository(directory, commits = { "base-sha": {}, "head-sha": {} }) 
     const pushback = await attempt("This is fine because RBAC caps it.", "OWNER");
     assert.equal(pushback.skip, "false");
     assert.equal(pushback.waiver, "");
-    // Below the allowed role, or without a reason, nothing happens.
+    // Below the allowed role, or without a reason, nothing happens. Listing
+    // yourself in the pull request's own CODEOWNERS does not count.
     assert.equal((await attempt("@review waive trust me", "COLLABORATOR")).skip, "true");
     assert.equal((await attempt("@review waive", "OWNER")).skip, "true");
-    assert.equal((await attempt("@review waive org call", "MEMBER", "owner, member")).waiver, "org call");
+    assert.equal((await attempt("@review waive org call", "MEMBER", { roles: "owner, member" })).waiver, "org call");
+    // A code owner on the landing commit may waive whatever their role.
+    assert.equal((await attempt("@review waive client call", "COLLABORATOR", { login: "Omar" })).waiver, "client call");
 });
 (0, node_test_1.test)("reply mode applies the rules covering the thread's file", async () => {
     const github = {
@@ -1257,6 +1263,17 @@ function gitRepository(directory, commits = { "base-sha": {}, "head-sha": {} }) 
         // Standard level: the planted evil.md is gone and only the real finder remains.
         assert.deepEqual(fs.readdirSync(path.join(directory, ".codex/finders")), ["review.md"]);
         assert.equal(fs.existsSync(path.join(directory, ".codex/candidates")), false);
+    });
+});
+(0, node_test_1.test)("code owners are the logins in the first CODEOWNERS file GitHub would read", async () => {
+    await inTemporaryDirectory((directory) => {
+        gitRepository(directory, {
+            "base-sha": {
+                ".github/CODEOWNERS": "# Maintainers\n*  @Lead  @acme/core  ops@acme.dev\n/docs/  @writer  # @commented\n",
+                CODEOWNERS: "* @shadowed\n",
+            },
+        });
+        assert.deepEqual((0, helpers_js_1.codeOwners)("base-sha"), ["lead", "writer"]);
     });
 });
 (0, node_test_1.test)("review rules come from the given commit and cover only their directories", async () => {
