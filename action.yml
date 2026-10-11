@@ -6,7 +6,7 @@ inputs:
     description: "Event handler to run: review, command, or reply."
     required: true
   review-level:
-    description: "Review depth: standard runs one finder pass, thorough runs four focused finders in parallel. Both are followed by a verifier."
+    description: "Review depth: standard runs one finder pass, thorough runs four focused finders in parallel (five when a REVIEW.md covers the diff). Both are followed by a verifier."
     required: false
     default: standard
   app-id:
@@ -108,6 +108,7 @@ runs:
         M6D_PR_TITLE: ${{ steps.pr.outputs.title }}
         M6D_BASE_REF: ${{ steps.pr.outputs.base_ref }}
         M6D_BASE_SHA: ${{ steps.pr.outputs.base_sha }}
+        M6D_RULES_SHA: ${{ steps.pr.outputs.rules_sha }}
         M6D_HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
         M6D_APP_SLUG: ${{ steps.review-app-token.outputs.app-slug }}
         M6D_REVIEW_LEVEL: ${{ inputs.review-level }}
@@ -128,7 +129,8 @@ runs:
           test -s "$3"
         }
         # Finder prompts were written by prepare: one for standard, four for
-        # thorough. They run in parallel; any finder failure fails the review.
+        # thorough plus a rules finder when a REVIEW.md covers the diff. They
+        # run in parallel; any finder failure fails the review.
         # Finders run at high reasoning because recall drops sharply below it.
         # The verifier runs at medium: on the same candidates it keeps every
         # HIGH and MEDIUM finding at roughly half the wall time.
@@ -284,6 +286,7 @@ runs:
       env:
         M6D_ACTION_PATH: ${{ github.action_path }}
         M6D_BASE_SHA: ${{ steps.reply-context.outputs.base_sha }}
+        M6D_RULES_SHA: ${{ steps.reply-context.outputs.rules_sha }}
         M6D_HEAD_SHA: ${{ steps.reply-context.outputs.head_sha }}
         M6D_WAIVE_ROLES: ${{ inputs.waive-roles }}
       with:

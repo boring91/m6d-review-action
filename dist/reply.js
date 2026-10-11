@@ -68,6 +68,8 @@ async function validate({ github, context, core, }) {
     core.setOutput("head_sha", pr.head.sha);
     core.setOutput("base_ref", pr.base.ref);
     core.setOutput("base_sha", pr.base.sha);
+    // Review rules come from where the PR lands, never from the layer below.
+    core.setOutput("rules_sha", pr.stack?.base.sha ?? pr.base.sha);
 }
 async function prepare({ github, context, core, }) {
     const { owner, repo } = context.repo;
@@ -141,7 +143,8 @@ async function prepare({ github, context, core, }) {
         core.setOutput("waiver", reason);
         return;
     }
-    const path = root.path ?? triggerComment.path ?? "unknown";
+    const file = root.path ?? triggerComment.path ?? undefined;
+    const path = file ?? "unknown";
     const line = triggerComment.line ??
         triggerComment.original_line ??
         root.line ??
@@ -200,6 +203,8 @@ async function prepare({ github, context, core, }) {
         },
     };
     const prompt = (0, helpers_js_1.readPrompt)("reply.md").replace("{{repository}}", `${owner}/${repo}`);
+    // The rules the review applied to this file, from the refreshed PR.
+    const rules = (0, helpers_js_1.reviewRules)(process.env.M6D_RULES_SHA ?? "", file ? [file] : []);
     // The checkout is untrusted PR content; start from an empty .codex.
     fs.rmSync(".codex", { recursive: true, force: true });
     fs.mkdirSync(".codex", { recursive: true });
@@ -216,7 +221,7 @@ async function prepare({ github, context, core, }) {
         `- Full PR diff: git diff ${baseSha}...${headSha}`,
         `- File diff: git diff ${baseSha}...${headSha} -- ${path}`,
         "- Context file: .codex/reply-context.md",
-        "",
+        rules.prompt,
     ].join("\n"), "utf8");
     core.setOutput("skip", "false");
     core.setOutput("waiver", "");

@@ -21,7 +21,7 @@ Severity legend:
 🔵 `LOW`: minor hygiene, small simplification, low-risk edge case, or localized style issue.
 🟢 `INFO`: non-blocking note, clarification, or optional improvement.
 
-Report everything you can substantiate; a separate verifier confirms or drops each candidate. Do not report pre-existing issues unrelated to this PR. Missing test coverage is never a finding. Return an empty `candidates` array when you find nothing.
+Report everything you can substantiate; a separate verifier confirms or drops each candidate. Do not report pre-existing issues unrelated to this PR. Missing test coverage is never a finding by default. Return an empty `candidates` array when you find nothing.
 
 When the same defect pattern appears in more than one place (for example several commands that ignore trailing arguments, or several images on mutable tags), search the whole diff for every instance and report the pattern once: anchor it at one location and list every other affected `file:line` in `body` and `evidence`. Do not report one instance now and leave siblings for a later round.
 

@@ -39,10 +39,13 @@ exports.readPrompt = readPrompt;
 exports.parseJson = parseJson;
 exports.truncate = truncate;
 exports.quote = quote;
+exports.git = git;
+exports.reviewRules = reviewRules;
 exports.isTrustedAssociation = isTrustedAssociation;
 exports.normalizeBotLogin = normalizeBotLogin;
 exports.errorMessage = errorMessage;
 exports.pullRequestProblems = pullRequestProblems;
+const node_child_process_1 = require("node:child_process");
 const fs = __importStar(require("node:fs"));
 const path = __importStar(require("node:path"));
 const TRUSTED_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
@@ -85,6 +88,72 @@ function quote(value, max = 2500) {
         .split("\n")
         .map((line) => `> ${line}`)
         .join("\n");
+}
+// Runs git in the checkout and returns its output. Paths are literal, so a
+// directory named like pathspec magic (`:/`, `:(glob)`) matches only itself.
+function git(...args) {
+    return (0, node_child_process_1.execFileSync)("git", ["--literal-pathspecs", ...args], {
+        encoding: "utf8",
+        maxBuffer: 64 * 1024 * 1024,
+    });
+}
+// Size caps, in characters, on the REVIEW.md text pasted into a prompt.
+const RULES_FILE_LIMIT = 20_000;
+const RULES_TOTAL_LIMIT = 60_000;
+// The maintainer review rules covering `files`: the REVIEW.md in each file's
+// directory and in every directory above it, read at `base`, the commit the
+// pull request lands on (`rules_sha` from resolve or validate). Reading them
+// there rather than from the checkout means a pull request cannot rewrite the
+// rules its own review runs under. Deeper files win on conflict, so they get
+// the size budget first and are listed last.
+function reviewRules(base, files) {
+    if (files.length === 0)
+        return { prompt: "", applied: [], cut: [] };
+    const candidates = new Set(["REVIEW.md"]);
+    for (const file of files) {
+        const parts = file.split("/");
+        for (let end = 1; end < parts.length; end += 1) {
+            candidates.add(`${parts.slice(0, end).join("/")}/REVIEW.md`);
+        }
+    }
+    // Entries read `<mode> <type> <object>\t<path>`. Only regular files hold
+    // rules; a symlink would otherwise be applied as its link text.
+    const found = git("ls-tree", "-z", base, "--", ...candidates)
+        .split("\0")
+        .filter((entry) => /^100(?:644|755) blob /.test(entry))
+        .map((entry) => entry.slice(entry.indexOf("\t") + 1));
+    const depth = (file) => file.split("/").length;
+    found.sort((left, right) => depth(right) - depth(left) || right.localeCompare(left));
+    const sections = [];
+    const applied = [];
+    const cut = [];
+    const leftOut = [];
+    let budget = RULES_TOTAL_LIMIT;
+    // Deepest first so deeper files claim the budget; unshift lists root first.
+    for (const file of found) {
+        const text = git("show", `${base}:${file}`).trim();
+        const room = Math.min(RULES_FILE_LIMIT, budget);
+        if (text.length > room)
+            cut.unshift(file);
+        if (!text)
+            continue;
+        if (room <= 0) {
+            leftOut.unshift(file);
+            continue;
+        }
+        budget -= Math.min(text.length, room);
+        const scope = file === "REVIEW.md" ? "every file" : `files under \`${path.posix.dirname(file)}/\``;
+        sections.unshift(`### \`${file}\` (applies to ${scope})\n\n${quote(text, room)}`);
+        applied.unshift(file);
+    }
+    if (leftOut.length > 0) {
+        sections.push(`Left out because of the size limit: ${leftOut.map((file) => `\`${file}\``).join(", ")}.`);
+    }
+    return {
+        prompt: applied.length ? `\n${readPrompt("rules.md")}\n\n${sections.join("\n\n")}\n` : "",
+        applied,
+        cut,
+    };
 }
 function isTrustedAssociation(value) {
     return typeof value === "string" && TRUSTED_ASSOCIATIONS.has(value);

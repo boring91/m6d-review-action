@@ -77,6 +77,13 @@ const RAISED_FILE = ".codex/raised.json";
 const RAISED_LIMIT = 2;
 const CONCEDED = "Conceded to the author";
 const LABEL = /^(?:🔴|🟠|🟡|🔵|🟢) (?:CRITICAL|HIGH|MEDIUM|LOW|INFO)\s*/;
+// The REVIEW.md rules covering the PR's changed files, written by prepare so
+// the thread retry gets the same rules and submit can list what was applied.
+const RULES_FILE = ".codex/rules.json";
+// State prepare left in .codex for later steps, or `fallback` when absent.
+function readState(file, fallback) {
+    return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : fallback;
+}
 // One spelling of a title for the comment header and the raised lookup.
 function findingTitle(value) {
     return (0, helpers_js_1.truncate)(value, 200).replace(/\*\*/g, "").replace(/\s+/g, " ").trim();
@@ -99,22 +106,29 @@ async function resolve({ github, context, core, }) {
     // The PR's own base, so a stacked layer is reviewed against the layer below.
     core.setOutput("base_ref", pullRequest.base.ref);
     core.setOutput("base_sha", pullRequest.base.sha);
+    // Review rules come from where the PR lands, never from the layer below,
+    // which is an unmerged branch the same author controls.
+    core.setOutput("rules_sha", pullRequest.stack?.base.sha ?? pullRequest.base.sha);
     core.setOutput("title", pullRequest.title ?? "");
 }
 // The verifier confirms or drops every candidate before anything reaches the
 // PR. A thorough review gives each dimension its own finder session; a
-// standard review covers all four in one.
+// standard review covers all of them in one. RULES_DIMENSION joins them only
+// when a REVIEW.md covers the diff, and only the finder holding it sees the
+// rules.
+const RULES_DIMENSION = "Repository rules: proven violations of the quoted REVIEW.md rules in files those rules cover.";
 const DIMENSIONS = {
     correctness: "Correctness and reliability: broken workflows, regressions, edge cases, state transitions, concurrency, error handling, data integrity, and compatibility.",
     security: "Security and trust boundaries: authentication, authorization, ownership and tenant isolation, input validation, injection, data exposure, secrets, unsafe configuration, and dependency risks.",
     minimality: "Minimality and reuse: existing code that can be reused, duplicated logic, unnecessary dependencies or abstractions, scope creep, and materially smaller implementations. Optimize for fewer concepts, branches, dependencies, and duplicated paths rather than raw line count.",
     taste: "Taste and consistency: naming, readability, language idioms, API shape, error-handling conventions, code smells, UI consistency, and alignment with established repository patterns.",
 };
-function finders(level) {
+function finders(level, rules) {
+    const dimensions = rules ? { ...DIMENSIONS, rules: RULES_DIMENSION } : DIMENSIONS;
     if (level === "thorough")
-        return DIMENSIONS;
+        return dimensions;
     return {
-        review: Object.values(DIMENSIONS)
+        review: Object.values(dimensions)
             .map((dimension) => `- ${dimension}`)
             .join("\n"),
     };
@@ -491,7 +505,8 @@ async function prepare({ github, context, }) {
             ? [
                 `- Previously reviewed head: ${incremental.previous_head}`,
                 `- Changed since the last review: git diff ${incremental.previous_head}...${process.env.M6D_HEAD_SHA}`,
-                `- Files changed since the last review: ${incremental.files.map((file) => file.filename).join(", ")}`,
+                // JSON keeps a filename with a newline from forging prompt lines.
+                `- Files changed since the last review: ${JSON.stringify(incremental.files.map((file) => file.filename))}`,
             ]
             : ["- This is the first review of this pull request."]),
         ...(Object.keys(raised).length
@@ -514,6 +529,11 @@ async function prepare({ github, context, }) {
         .filter((thread) => !thread.isResolved &&
         (0, helpers_js_1.normalizeBotLogin)(thread.comments.nodes[0]?.author?.login) === appLogin)
         .map((thread) => thread.id);
+    // Without rename detection a moved file lists both paths, so the rules of
+    // the directory it left still apply.
+    const rules = (0, helpers_js_1.reviewRules)(process.env.M6D_RULES_SHA ?? "", (0, helpers_js_1.git)("diff", "--name-only", "--no-renames", "-z", `${process.env.M6D_BASE_SHA}...${process.env.M6D_HEAD_SHA}`)
+        .split("\0")
+        .filter(Boolean));
     // The checkout is untrusted PR content. Start from an empty .codex so a PR
     // cannot plant extra finder prompts, fake candidates, or symlinked logs.
     fs.rmSync(".codex", { recursive: true, force: true });
@@ -522,15 +542,17 @@ async function prepare({ github, context, }) {
     fs.writeFileSync(OPEN_THREADS_FILE, `${JSON.stringify(openThreadIds)}\n`, "utf8");
     fs.writeFileSync(PRECEDENT_FILE, `${JSON.stringify(precedent)}\n`, "utf8");
     fs.writeFileSync(RAISED_FILE, `${JSON.stringify(raised)}\n`, "utf8");
+    fs.writeFileSync(RULES_FILE, `${JSON.stringify(rules)}\n`, "utf8");
     if (incremental) {
         fs.writeFileSync(INCREMENTAL_FILE, `${JSON.stringify(incremental)}\n`, "utf8");
     }
     fs.writeFileSync(".codex/candidates-schema.json", `${JSON.stringify(candidatesSchema(), null, 2)}\n`, "utf8");
     fs.writeFileSync(".codex/review-schema.json", `${JSON.stringify(reviewSchema(openThreadIds), null, 2)}\n`, "utf8");
-    for (const [key, dimension] of Object.entries(finders(process.env.M6D_REVIEW_LEVEL))) {
-        fs.writeFileSync(`.codex/finders/${key}.md`, `${finderPrompt(repository, dimension)}\n${target}`, "utf8");
+    for (const [key, dimension] of Object.entries(finders(process.env.M6D_REVIEW_LEVEL, Boolean(rules.prompt)))) {
+        const covered = dimension.includes(RULES_DIMENSION) ? rules.prompt : "";
+        fs.writeFileSync(`.codex/finders/${key}.md`, `${finderPrompt(repository, dimension)}\n${target}${covered}`, "utf8");
     }
-    fs.writeFileSync(".codex/review-prompt.md", `${(0, helpers_js_1.readPrompt)("verify.md").replace("{{repository}}", repository)}\n${target}`, "utf8");
+    fs.writeFileSync(".codex/review-prompt.md", `${(0, helpers_js_1.readPrompt)("verify.md").replace("{{repository}}", repository)}\n${target}${rules.prompt}`, "utf8");
 }
 // On a re-review, the diff between the last bot-reviewed commit and the current
 // head. Returns undefined on a first review, after a force push, or when the
@@ -581,7 +603,7 @@ async function checkThreads({ context, core, }) {
         ...missing.map((id) => `- ${id}`),
         "",
         `Compare with: git diff ${process.env.M6D_BASE_SHA}...${process.env.M6D_HEAD_SHA}`,
-        "",
+        readState(RULES_FILE, undefined)?.prompt ?? "",
     ].join("\n"), "utf8");
 }
 function normalizePath(value) {
@@ -841,9 +863,7 @@ function scopeComments(comments, incremental, precedent, raised, dropped, core) 
 // every open thread that still has no decision as OPEN. A NOT_APPLICABLE
 // without the required explanation also stays OPEN rather than closing silently.
 function threadDecisions(review, core) {
-    const expected = fs.existsSync(OPEN_THREADS_FILE)
-        ? JSON.parse(fs.readFileSync(OPEN_THREADS_FILE, "utf8"))
-        : [];
+    const expected = readState(OPEN_THREADS_FILE, []);
     const retry = fs.existsSync(".codex/threads.json")
         ? (0, helpers_js_1.parseJson)(fs.readFileSync(".codex/threads.json", "utf8").trim(), "Codex thread retry output").threads
         : [];
@@ -885,13 +905,7 @@ async function submit({ github, context, core, }) {
     }
     const dropped = Array.isArray(review.dropped) ? [...review.dropped] : [];
     // INFO never blocks: it stays in the review body and is never posted inline.
-    const { comments, conceded, waived } = scopeComments((Array.isArray(review.comments) ? review.comments : []).filter((comment) => comment.severity !== "INFO"), fs.existsSync(INCREMENTAL_FILE)
-        ? JSON.parse(fs.readFileSync(INCREMENTAL_FILE, "utf8"))
-        : undefined, fs.existsSync(PRECEDENT_FILE)
-        ? JSON.parse(fs.readFileSync(PRECEDENT_FILE, "utf8"))
-        : [], fs.existsSync(RAISED_FILE)
-        ? JSON.parse(fs.readFileSync(RAISED_FILE, "utf8"))
-        : {}, dropped, core);
+    const { comments, conceded, waived } = scopeComments((Array.isArray(review.comments) ? review.comments : []).filter((comment) => comment.severity !== "INFO"), readState(INCREMENTAL_FILE, undefined), readState(PRECEDENT_FILE, []), readState(RAISED_FILE, {}), dropped, core);
     // A conceded finding's threads close with the invariant as the reply even
     // when the verifier kept them OPEN, so the cap actually ends the loop. One
     // the verifier already marked FIXED closes as fixed instead.
@@ -963,7 +977,16 @@ async function submit({ github, context, core, }) {
         body += `\n\nWorkflow note: ${inline.omitted} inline comment(s) were omitted because they were missing path, line, or body.`;
     }
     // GitHub caps review bodies at 65536 characters; cut the assembled text.
-    body = (0, helpers_js_1.truncate)(body, 60000);
+    // The applied-rules record goes on after the cut so it always survives.
+    const rules = readState(RULES_FILE, undefined);
+    const named = (list) => list.map((file) => `\`${file}\``).join(", ");
+    const record = [
+        rules?.applied.length ? `\n\nReview rules applied: ${named(rules.applied)}.` : "",
+        rules?.cut.length
+            ? `\n\nWorkflow note: the review-rules size limit shortened or dropped ${named(rules.cut)}.`
+            : "",
+    ].join("");
+    body = (0, helpers_js_1.truncate)(body, 60000 - record.length) + record;
     // Pin the review to the commit Codex actually reviewed. Without this GitHub
     // files it under the newest head, so a push during the run would attach the
     // verdict and line numbers to code the review never saw.

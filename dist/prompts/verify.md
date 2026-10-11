@@ -48,4 +48,4 @@ In `## Review`, list every confirmed finding, prefixed with the matching colored
 
 In `## Previous Review Comments`, read `.codex/pr-context.md`. If any previous review comment is still unresolved in the current diff, call it out here and add an inline comment when the line still exists. State each thread's decision here to match its `threads` entry. If there are no previous comments or none remain applicable, say that directly.
 
-Do not run builds or checks. Do not modify files, do not commit, and do not post anything yourself. Missing test coverage is never a finding. Produce only the JSON review object. If you cannot inspect the diff, set `review_completed` to `false`.
+Do not run builds or checks. Do not modify files, do not commit, and do not post anything yourself. Missing test coverage is never a finding by default. Produce only the JSON review object. If you cannot inspect the diff, set `review_completed` to `false`.

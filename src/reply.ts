@@ -9,6 +9,7 @@ import {
   quote,
   raisedTitle,
   readPrompt,
+  reviewRules,
   truncate,
   WAIVE_COMMAND,
   WAIVED,
@@ -78,6 +79,8 @@ export async function validate({
   core.setOutput("head_sha", pr.head.sha);
   core.setOutput("base_ref", pr.base.ref);
   core.setOutput("base_sha", pr.base.sha);
+  // Review rules come from where the PR lands, never from the layer below.
+  core.setOutput("rules_sha", pr.stack?.base.sha ?? pr.base.sha);
 }
 
 export async function prepare({
@@ -174,7 +177,8 @@ export async function prepare({
     return;
   }
 
-  const path = root.path ?? triggerComment.path ?? "unknown";
+  const file: string | undefined = root.path ?? triggerComment.path ?? undefined;
+  const path = file ?? "unknown";
   const line =
     triggerComment.line ??
     triggerComment.original_line ??
@@ -252,6 +256,8 @@ export async function prepare({
     "{{repository}}",
     `${owner}/${repo}`,
   );
+  // The rules the review applied to this file, from the refreshed PR.
+  const rules = reviewRules(process.env.M6D_RULES_SHA ?? "", file ? [file] : []);
 
   // The checkout is untrusted PR content; start from an empty .codex.
   fs.rmSync(".codex", { recursive: true, force: true });
@@ -275,7 +281,7 @@ export async function prepare({
       `- Full PR diff: git diff ${baseSha}...${headSha}`,
       `- File diff: git diff ${baseSha}...${headSha} -- ${path}`,
       "- Context file: .codex/reply-context.md",
-      "",
+      rules.prompt,
     ].join("\n"),
     "utf8",
   );
