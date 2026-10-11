@@ -125,7 +125,8 @@ async function prepare({ github, context, core, }) {
     core.setOutput("root_comment_id", String(rootId));
     core.setOutput("bot_login", botLogin);
     // A waiver never reaches Codex: the model's verdict cannot be argued down,
-    // only overridden on record by a role the consumer trusts to accept risk.
+    // only overridden on record by a code owner or a role the consumer trusts to
+    // accept risk.
     const waive = String(triggerComment.body ?? "").trim().match(helpers_js_1.WAIVE_COMMAND);
     if (waive) {
         // One line: the review body records it as `- **title**: reason` later.
@@ -133,12 +134,14 @@ async function prepare({ github, context, core, }) {
         const roles = (process.env.M6D_WAIVE_ROLES || "OWNER")
             .split(",")
             .map((role) => role.trim().toUpperCase());
+        const login = String(triggerComment.user.login);
         if (!reason)
             return skip("Waiver without a reason; skipping. Use `@review waive <reason>`.");
-        if (!roles.includes(String(triggerComment.author_association))) {
-            return skip(`Waiver from ${triggerComment.author_association ?? "unknown"} ignored; allowed roles: ${roles.join(", ")}.`);
+        if (!roles.includes(String(triggerComment.author_association)) &&
+            !(0, helpers_js_1.codeOwners)(process.env.M6D_RULES_SHA ?? "").includes(login.toLowerCase())) {
+            return skip(`Waiver from ${login} (${triggerComment.author_association ?? "unknown"}) ignored; not a code owner, and allowed roles are ${roles.join(", ")}.`);
         }
-        core.info(`Waiver by ${triggerComment.user.login}: ${reason}`);
+        core.info(`Waiver by ${login}: ${reason}`);
         core.setOutput("skip", "false");
         core.setOutput("waiver", reason);
         return;

@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { test } from "node:test";
 
 import {
+  codeOwners,
   isTrustedAssociation,
   normalizeBotLogin,
   parseJson,
@@ -1068,7 +1069,7 @@ test("thread check retries only skipped threads and merges the retry", async () 
   });
 });
 
-test("waivers bypass Codex for allowed roles only and need a reason", async () => {
+test("waivers bypass Codex for code owners and allowed roles only and need a reason", async () => {
   const rootBody = "🟠 HIGH **Live tools**\n\nfinding";
   const github = {
     rest: { pulls: { listReviewComments: () => {} } },
@@ -1077,17 +1078,21 @@ test("waivers bypass Codex for allowed roles only and need a reason", async () =
       { id: 7, user: { login: "m6d-review[bot]" }, body: rootBody, path: "a.ts", line: 1, created_at: "2026-01-01T00:00:00Z" },
     ],
   } as unknown as GitHub;
-  const attempt = async (body: string, association: string, roles?: string) => {
+  const attempt = async (body: string, association: string, roles?: string, login = "owner") => {
     const core = createCore();
     const context: Context = {
       repo: { owner: "acme", repo: "project" },
       payload: {
         pull_request: pullRequest(),
-        comment: { id: 8, user: { login: "owner" }, in_reply_to_id: 7, body, author_association: association },
+        comment: { id: 8, user: { login }, in_reply_to_id: 7, body, author_association: association },
       },
     };
     await inTemporaryDirectory(async (directory) => {
-      gitRepository(directory);
+      gitRepository(directory, {
+        "base-sha": { ".github/CODEOWNERS": "* @omar\n" },
+        // A pull request cannot make its own author a code owner.
+        "head-sha": { ".github/CODEOWNERS": "* @owner\n" },
+      });
       await withEnvironment(
         {
           M6D_HEAD_SHA: "head-sha",
@@ -1113,6 +1118,8 @@ test("waivers bypass Codex for allowed roles only and need a reason", async () =
   assert.equal((await attempt("@review waive trust me", "COLLABORATOR")).skip, "true");
   assert.equal((await attempt("@review waive", "OWNER")).skip, "true");
   assert.equal((await attempt("@review waive org call", "MEMBER", "owner, member")).waiver, "org call");
+  // A code owner may waive whatever their role.
+  assert.equal((await attempt("@review waive client call", "COLLABORATOR", undefined, "Omar")).waiver, "client call");
 });
 
 test("reply mode applies the rules covering the thread's file", async () => {
@@ -1419,6 +1426,18 @@ test("prepare starts from a clean .codex directory", async () => {
     // Standard level: the planted evil.md is gone and only the real finder remains.
     assert.deepEqual(fs.readdirSync(path.join(directory, ".codex/finders")), ["review.md"]);
     assert.equal(fs.existsSync(path.join(directory, ".codex/candidates")), false);
+  });
+});
+
+test("code owners are the logins in the first CODEOWNERS file GitHub would read", async () => {
+  await inTemporaryDirectory((directory) => {
+    gitRepository(directory, {
+      "base-sha": {
+        ".github/CODEOWNERS": "# Maintainers\n*  @Lead  @acme/core  ops@acme.dev\n/docs/  @writer  # @commented\n",
+        CODEOWNERS: "* @shadowed\n",
+      },
+    });
+    assert.deepEqual(codeOwners("base-sha"), ["lead", "writer"]);
   });
 });
 

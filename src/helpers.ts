@@ -62,6 +62,32 @@ export function git(...args: string[]): string {
   });
 }
 
+// The `paths` that are regular files at `base`. Entries read
+// `<mode> <type> <object>\t<path>`; a symlink would otherwise be read as its
+// link text.
+function filesAt(base: string, paths: Iterable<string>): string[] {
+  return git("ls-tree", "-z", base, "--", ...paths)
+    .split("\0")
+    .filter((entry) => /^100(?:644|755) blob /.test(entry))
+    .map((entry) => entry.slice(entry.indexOf("\t") + 1));
+}
+
+// Where GitHub looks for CODEOWNERS, in the order it picks the first found.
+const CODEOWNERS_FILES = [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"];
+
+// Lowercased logins named in the CODEOWNERS file, read at `base` like the
+// review rules so a pull request cannot list its own author. Team and email
+// owners are skipped, and an owner of any path counts for every path.
+export function codeOwners(base: string): string[] {
+  const found = filesAt(base, CODEOWNERS_FILES);
+  const file = CODEOWNERS_FILES.find((candidate) => found.includes(candidate));
+  if (!file) return [];
+  return git("show", `${base}:${file}`)
+    .split("\n")
+    .flatMap((line) => line.replace(/#.*/, "").trim().split(/\s+/).slice(1))
+    .flatMap((owner) => owner.match(/^@([\w-]+)$/)?.[1].toLowerCase() ?? []);
+}
+
 // Size caps, in characters, on the REVIEW.md text pasted into a prompt.
 const RULES_FILE_LIMIT = 20_000;
 const RULES_TOTAL_LIMIT = 60_000;
@@ -87,12 +113,7 @@ export function reviewRules(base: string, files: string[]): Rules {
     }
   }
 
-  // Entries read `<mode> <type> <object>\t<path>`. Only regular files hold
-  // rules; a symlink would otherwise be applied as its link text.
-  const found = git("ls-tree", "-z", base, "--", ...candidates)
-    .split("\0")
-    .filter((entry) => /^100(?:644|755) blob /.test(entry))
-    .map((entry) => entry.slice(entry.indexOf("\t") + 1));
+  const found = filesAt(base, candidates);
   const depth = (file: string) => file.split("/").length;
   found.sort((left, right) => depth(right) - depth(left) || right.localeCompare(left));
 

@@ -24,7 +24,7 @@ inputs:
     required: false
     default: review.yml
   waive-roles:
-    description: "Comma-separated author associations allowed to close a finding with `@review waive <reason>`. Use MEMBER for organisation-owned repositories."
+    description: "Comma-separated author associations allowed to close a finding with `@review waive <reason>`, on top of the users listed in CODEOWNERS. Use MEMBER for organisation-owned repositories."
     required: false
     default: OWNER
 
