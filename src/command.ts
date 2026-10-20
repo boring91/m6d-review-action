@@ -1,7 +1,7 @@
-import { errorMessage, isTrustedAssociation } from "./helpers.js";
+import { errorMessage, isTrustedAssociation, startReview } from "./helpers.js";
 import type { HandlerOptions } from "./types.js";
 
-export async function dispatchReview({
+export async function handleCommand({
   github,
   context,
   core,
@@ -42,16 +42,6 @@ export async function dispatchReview({
     core.warning(`Could not react to the command comment: ${errorMessage(error)}`);
   }
 
-  core.info(
-    `@review from ${comment.user.login}; dispatching review for PR #${prNumber}.`,
-  );
-  const defaultBranch = context.payload.repository?.default_branch;
-  if (!defaultBranch) throw new Error("Repository default branch is unavailable.");
-  await github.rest.actions.createWorkflowDispatch({
-    owner,
-    repo,
-    workflow_id: process.env.M6D_REVIEW_WORKFLOW || "review.yml",
-    ref: defaultBranch,
-    inputs: { pr_number: String(prNumber) },
-  });
+  core.info(`@review from ${comment.user.login}; starting a review of PR #${prNumber}.`);
+  await startReview({ github, context, core }, prNumber);
 }

@@ -1,8 +1,8 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.dispatchReview = dispatchReview;
+exports.handleCommand = handleCommand;
 const helpers_js_1 = require("./helpers.js");
-async function dispatchReview({ github, context, core, }) {
+async function handleCommand({ github, context, core, }) {
     const { owner, repo } = context.repo;
     const issue = context.payload.issue;
     const comment = context.payload.comment;
@@ -37,15 +37,6 @@ async function dispatchReview({ github, context, core, }) {
     catch (error) {
         core.warning(`Could not react to the command comment: ${(0, helpers_js_1.errorMessage)(error)}`);
     }
-    core.info(`@review from ${comment.user.login}; dispatching review for PR #${prNumber}.`);
-    const defaultBranch = context.payload.repository?.default_branch;
-    if (!defaultBranch)
-        throw new Error("Repository default branch is unavailable.");
-    await github.rest.actions.createWorkflowDispatch({
-        owner,
-        repo,
-        workflow_id: process.env.M6D_REVIEW_WORKFLOW || "review.yml",
-        ref: defaultBranch,
-        inputs: { pr_number: String(prNumber) },
-    });
+    core.info(`@review from ${comment.user.login}; starting a review of PR #${prNumber}.`);
+    await (0, helpers_js_1.startReview)({ github, context, core }, prNumber);
 }

@@ -10,7 +10,7 @@ inputs:
     required: false
     default: standard
   app-id:
-    description: GitHub App ID used to submit reviews and dispatch workflows.
+    description: GitHub App ID used to submit reviews and start review runs.
     required: true
   app-private-key:
     description: GitHub App private key.
@@ -20,7 +20,7 @@ inputs:
     required: false
     default: ""
   review-workflow:
-    description: Workflow filename dispatched by @review and final thread resolution.
+    description: Workflow filename that @review and final thread resolution re-run or dispatch.
     required: false
     default: review.yml
   waive-roles:
@@ -222,8 +222,9 @@ runs:
         private-key: ${{ inputs.app-private-key }}
         permission-actions: write
         permission-issues: write
+        permission-pull-requests: read
 
-    - name: Dispatch requested review
+    - name: Start requested review
       if: inputs.mode == 'command'
       uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
       env:
@@ -232,8 +233,8 @@ runs:
       with:
         github-token: ${{ steps.command-app-token.outputs.token }}
         script: |
-          const { dispatchReview } = require(`${process.env.M6D_ACTION_PATH}/dist/command.js`);
-          await dispatchReview({ github, context, core });
+          const { handleCommand } = require(`${process.env.M6D_ACTION_PATH}/dist/command.js`);
+          await handleCommand({ github, context, core });
 
     - name: Create reply app token
       id: reply-app-token

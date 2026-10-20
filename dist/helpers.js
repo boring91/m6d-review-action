@@ -46,6 +46,7 @@ exports.isTrustedAssociation = isTrustedAssociation;
 exports.normalizeBotLogin = normalizeBotLogin;
 exports.errorMessage = errorMessage;
 exports.pullRequestProblems = pullRequestProblems;
+exports.startReview = startReview;
 const node_child_process_1 = require("node:child_process");
 const fs = __importStar(require("node:fs"));
 const path = __importStar(require("node:path"));
@@ -205,4 +206,60 @@ function pullRequestProblems(pr, expectedRepo, expectedBase) {
         problems.push(`head repo is ${pr?.head?.repo?.full_name}, expected ${expectedRepo}`);
     }
     return problems;
+}
+// Starts a full review of the PR's current head. Re-running the head's last
+// pull_request review puts the result on the commit the PR's check list
+// shows; a dispatched run reports on the default branch's tip, where the PR
+// never sees it. A run that hasn't finished is left alone, because a dispatch
+// would cancel it through the review workflow's concurrency group. It may
+// have read the threads before this request, so the user comments `@review`
+// after it finishes if it missed a reply or waiver. Dispatch is the fallback
+// when the head's last run is missing or skipped, has reached 50 attempts
+// (GitHub caps re-runs at 50), or GitHub refuses the re-run, as it does 30
+// days after the run started.
+async function startReview({ github, context, core }, pullNumber) {
+    const { owner, repo } = context.repo;
+    const workflow = process.env.M6D_REVIEW_WORKFLOW || "review.yml";
+    const { head } = (await github.rest.pulls.get({ owner, repo, pull_number: pullNumber })).data;
+    // Filtering by branch skips another PR's run when its branch points at the
+    // same commit.
+    let [run] = (await github.rest.actions.listWorkflowRuns({
+        owner,
+        repo,
+        workflow_id: workflow,
+        event: "pull_request",
+        branch: head.ref,
+        head_sha: head.sha,
+        per_page: 1,
+    })).data.workflow_runs;
+    if (run?.status === "completed" && run.conclusion !== "skipped" && run.run_attempt < 50) {
+        try {
+            await github.rest.actions.reRunWorkflow({ owner, repo, run_id: run.id });
+            core.info(`Re-running review run ${run.id} on ${head.sha.slice(0, 7)}.`);
+            return;
+        }
+        catch (error) {
+            // A concurrent request may have just re-run it, which refuses this one.
+            run = (await github.rest.actions.getWorkflowRun({ owner, repo, run_id: run.id }))
+                .data;
+            if (run.status === "completed") {
+                core.warning(`Could not re-run review run ${run.id}: ${errorMessage(error)}`);
+            }
+        }
+    }
+    if (run && run.status !== "completed") {
+        core.notice(`Review run ${run.id} on ${head.sha.slice(0, 7)} has not finished; leaving it to review the head.`);
+        return;
+    }
+    const defaultBranch = context.payload.repository?.default_branch;
+    if (!defaultBranch)
+        throw new Error("Repository default branch is unavailable.");
+    core.info(`Dispatching ${workflow} on ${defaultBranch}.`);
+    await github.rest.actions.createWorkflowDispatch({
+        owner,
+        repo,
+        workflow_id: workflow,
+        ref: defaultBranch,
+        inputs: { pr_number: String(pullNumber) },
+    });
 }

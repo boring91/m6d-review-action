@@ -140,9 +140,11 @@ jobs:
           app-private-key: ${{ secrets.REVIEW_APP_PRIVATE_KEY }}
 ```
 
-`@review` and the final review after all threads resolve dispatch `review.yml` with only `pr_number`, so they run at whatever `review-level` that workflow sets.
+`@review` and the final review after all threads resolve re-run the latest `pull_request` run of `review.yml` on the PR head, so the new result replaces the old check in the PR's check list. If that run is still queued or running, they leave it to finish, because dispatching would cancel it through the shared concurrency group. It may have read the threads before the request, so comment `@review` after it finishes if it missed a reply or waiver.
 
-The full-review workflow must remain named `review.yml` because command and reply modes dispatch it. If another filename is required, pass the same `review-workflow` input to the command and reply modes.
+When the head's last run is missing or skipped, has reached 50 attempts (GitHub caps re-runs at 50), or GitHub refuses the re-run (for example 30 days after the run started), they dispatch `review.yml` with only `pr_number` instead. A dispatched run's check lands on the default branch's latest commit, so the PR's check list keeps showing the old result. Either way the review runs at whatever `review-level` the workflow sets, and it reads the PR as it is now, not as the original event saw it.
+
+The full-review workflow must remain named `review.yml` because command and reply modes re-run or dispatch it. If another filename is required, pass the same `review-workflow` input to the command and reply modes.
 
 ## Requirements
 
