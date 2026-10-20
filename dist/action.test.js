@@ -175,7 +175,7 @@ function gitRepository(directory, commits = { "base-sha": {}, "head-sha": {} }) 
     const action = fs.readFileSync(path.join(__dirname, "../action.yml"), "utf8");
     assert.equal(action.match(/permission-contents: write/g)?.length, 2);
 });
-(0, node_test_1.test)("review commands dispatch the review workflow", async () => {
+(0, node_test_1.test)("review commands start a review only for an exact @review comment", async () => {
     const dispatches = [];
     const context = {
         repo: { owner: "acme", repo: "project" },
@@ -192,23 +192,73 @@ function gitRepository(directory, commits = { "base-sha": {}, "head-sha": {} }) 
     };
     const github = {
         rest: {
+            pulls: { get: async () => ({ data: pullRequest() }) },
             actions: {
+                listWorkflowRuns: async () => ({ data: { workflow_runs: [] } }),
                 createWorkflowDispatch: async (payload) => dispatches.push(payload),
             },
             reactions: { createForIssueComment: async () => { } },
         },
     };
-    await command.dispatchReview({ github, context, core: createCore() });
+    await command.handleCommand({ github, context, core: createCore() });
     context.payload.comment.body = "  @Review \n";
-    await command.dispatchReview({ github, context, core: createCore() });
+    await command.handleCommand({ github, context, core: createCore() });
     // Mentions inside prose are not commands.
     context.payload.comment.body = "please do not run @review on this PR";
-    await command.dispatchReview({ github, context, core: createCore() });
+    await command.handleCommand({ github, context, core: createCore() });
     assert.equal(dispatches.length, 2);
     assert.deepEqual(dispatches[0].inputs, { pr_number: "42" });
 });
-(0, node_test_1.test)("reply validation rejects untrusted authors and uses the live PR head", async () => {
-    // The event payload carries a stale head; the API returns the current one.
+(0, node_test_1.test)("a requested review re-runs the head's last review, leaves a running one, and dispatches otherwise", async () => {
+    const calls = [];
+    let run;
+    // Set when GitHub refuses the re-run: the run's status when fetched again.
+    let refusedStatus;
+    const github = {
+        rest: {
+            pulls: { get: async () => ({ data: pullRequest() }) },
+            actions: {
+                listWorkflowRuns: async (query) => {
+                    assert.equal(query.event, "pull_request");
+                    assert.equal(query.branch, "feature");
+                    assert.equal(query.head_sha, "head-sha");
+                    return { data: { workflow_runs: run ? [run] : [] } };
+                },
+                reRunWorkflow: async ({ run_id }) => {
+                    if (refusedStatus)
+                        throw new Error("Unable to re-run this workflow run");
+                    calls.push(`rerun ${run_id}`);
+                },
+                getWorkflowRun: async () => ({ data: { ...run, status: refusedStatus } }),
+                createWorkflowDispatch: async ({ ref }) => calls.push(`dispatch ${ref}`),
+            },
+        },
+    };
+    const context = {
+        repo: { owner: "acme", repo: "project" },
+        payload: { repository: { default_branch: "main" } },
+    };
+    const start = (latest) => {
+        run = latest;
+        return (0, helpers_js_1.startReview)({ github, context, core: createCore() }, 42);
+    };
+    await start({ id: 1, status: "completed", conclusion: "failure", run_attempt: 1 });
+    await start({ id: 2, status: "in_progress", conclusion: null, run_attempt: 1 });
+    await start();
+    await start({ id: 3, status: "completed", conclusion: "skipped", run_attempt: 1 });
+    await start({ id: 4, status: "completed", conclusion: "failure", run_attempt: 50 });
+    // Refused because a concurrent request re-ran it first: leave that one going.
+    refusedStatus = "queued";
+    await start({ id: 5, status: "completed", conclusion: "success", run_attempt: 1 });
+    refusedStatus = "completed";
+    await start({ id: 6, status: "completed", conclusion: "success", run_attempt: 1 });
+    // Running reviews are left alone; no run, a skipped one, one at the re-run
+    // limit, or a refused re-run that is still finished each dispatch.
+    assert.deepEqual(calls, ["rerun 1", "dispatch main", "dispatch main", "dispatch main", "dispatch main"]);
+});
+(0, node_test_1.test)("replies reject untrusted authors, and replies and reviews read the live PR head", async () => {
+    // The event payload carries a stale head, as a re-run replays it; the API
+    // returns the current one.
     const current = { ...pullRequest(), head: { ...pullRequest().head, sha: "newer-sha" } };
     const github = {
         rest: { pulls: { get: async () => ({ data: current }) } },
@@ -234,6 +284,9 @@ function gitRepository(directory, commits = { "base-sha": {}, "head-sha": {} }) 
         await reply.validate({ github, context, core: trusted });
         assert.equal(trusted.outputs.skip, "false");
         assert.equal(trusted.outputs.head_sha, "newer-sha");
+        const reviewed = createCore();
+        await review.resolve({ github, context, core: reviewed });
+        assert.equal(reviewed.outputs.head_sha, "newer-sha");
         current.state = "closed";
         const closed = createCore();
         await reply.validate({ github, context, core: closed });
@@ -369,7 +422,7 @@ function gitRepository(directory, commits = { "base-sha": {}, "head-sha": {} }) 
                 updateComment: async (payload) => updates.push(payload),
                 createComment: async () => assert.fail("should update the existing app comment"),
             },
-            pulls: { listReviews },
+            pulls: { listReviews, get: async () => ({ data: { ...pullRequest(), body: "Live description" } }) },
             repos: {
                 compareCommits: async (payload) => {
                     compares.push(payload);
@@ -536,6 +589,8 @@ function gitRepository(directory, commits = { "base-sha": {}, "head-sha": {} }) 
         // Thorough: one finder per dimension.
         await withEnvironment({ ...env, M6D_REVIEW_LEVEL: "thorough" }, () => review.prepare({ github, context }));
         assert.match(read("pr-context.md"), /reply on page two/);
+        // The live PR, not the payload a re-run replays.
+        assert.match(read("pr-context.md"), /Live description/);
         const verifyPrompt = read("review-prompt.md");
         assert.match(verifyPrompt, /pull request for acme\/project/);
         assert.doesNotMatch(verifyPrompt, /\{\{repository\}\}/);
@@ -1094,13 +1149,13 @@ function gitRepository(directory, commits = { "base-sha": {}, "head-sha": {} }) 
     // Another finding is still open, so no final review is dispatched.
     assert.deepEqual(dispatches, []);
 });
-(0, node_test_1.test)("reply reruns still resolve and dispatch when the reply was already posted", async () => {
+(0, node_test_1.test)("a retried reply run still resolves and starts the final review when the reply was already posted", async () => {
     const replies = [];
     const resolved = [];
     const dispatches = [];
     // Stateful mock: a concurrent reply run resolves thread-2 the moment this
     // run resolves thread-1. The final-review decision must come from a fetch
-    // taken after our own resolve, or neither run would dispatch.
+    // taken after our own resolve, or neither run would start the final review.
     const state = new Map([
         ["thread-1", { rootId: 7, isResolved: false }],
         ["thread-2", { rootId: 9, isResolved: false }],
@@ -1109,8 +1164,10 @@ function gitRepository(directory, commits = { "base-sha": {}, "head-sha": {} }) 
         rest: {
             pulls: {
                 createReplyForReviewComment: async (payload) => replies.push(payload),
+                get: async () => ({ data: pullRequest() }),
             },
             actions: {
+                listWorkflowRuns: async () => ({ data: { workflow_runs: [] } }),
                 createWorkflowDispatch: async (payload) => dispatches.push(payload),
             },
         },
@@ -1231,7 +1288,7 @@ function gitRepository(directory, commits = { "base-sha": {}, "head-sha": {} }) 
     const github = {
         rest: {
             issues: { listComments: () => { }, createComment: async () => { } },
-            pulls: { listReviews: () => { } },
+            pulls: { listReviews: () => { }, get: async () => ({ data: pullRequest() }) },
         },
         paginate: async () => [],
         graphql: async () => ({
@@ -1323,7 +1380,7 @@ function gitRepository(directory, commits = { "base-sha": {}, "head-sha": {} }) 
     const github = {
         rest: {
             issues: { listComments: () => { }, createComment: async () => { } },
-            pulls: { listReviews: () => { } },
+            pulls: { listReviews: () => { }, get: async () => ({ data: pullRequest() }) },
         },
         paginate: async () => [],
         graphql: async () => ({

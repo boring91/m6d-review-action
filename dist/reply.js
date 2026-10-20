@@ -113,7 +113,7 @@ async function prepare({ github, context, core, }) {
         .sort((left, right) => new Date(left.created_at).getTime() -
         new Date(right.created_at).getTime());
     // A marker only means the reply text was posted. Resolution and the final
-    // dispatch may still be pending from a failed earlier run, so keep going and
+    // review may still be pending from a failed earlier run, so keep going and
     // let `post` skip just the duplicate reply.
     const marker = `<!-- codex-reply:${triggerComment.id} -->`;
     const alreadyReplied = thread.some((comment) => (0, helpers_js_1.normalizeBotLogin)(comment.user.login) === botLogin &&
@@ -337,21 +337,12 @@ async function post({ github, context, core, }) {
     }
     // Re-fetch after resolving. Concurrent reply runs each resolve their own
     // thread, so a snapshot taken before the mutation would let every run see
-    // another thread still open and nobody would dispatch the final review.
+    // another thread still open and nobody would start the final review.
     const remaining = (await listThreads()).filter((thread) => !thread.isResolved &&
         (0, helpers_js_1.normalizeBotLogin)(thread.comments.nodes[0]?.author?.login) === botLogin);
     core.info(`${remaining.length} unresolved ${botLogin} thread(s) remain.`);
     if (remaining.length > 0)
         return;
-    core.info("No unresolved review threads remain; dispatching a final review.");
-    const defaultBranch = context.payload.repository?.default_branch;
-    if (!defaultBranch)
-        throw new Error("Repository default branch is unavailable.");
-    await github.rest.actions.createWorkflowDispatch({
-        owner,
-        repo,
-        workflow_id: process.env.M6D_REVIEW_WORKFLOW,
-        ref: defaultBranch,
-        inputs: { pr_number: String(pullNumber) },
-    });
+    core.info("No unresolved review threads remain; starting a final review.");
+    await (0, helpers_js_1.startReview)({ github, context, core }, pullNumber);
 }

@@ -13,6 +13,7 @@ import {
   quote,
   readPrompt,
   reviewRules,
+  startReview,
   truncate,
 } from "./helpers.js";
 import * as command from "./command.js";
@@ -179,7 +180,7 @@ test("thread handlers request repository write access", () => {
   assert.equal(action.match(/permission-contents: write/g)?.length, 2);
 });
 
-test("review commands dispatch the review workflow", async () => {
+test("review commands start a review only for an exact @review comment", async () => {
   const dispatches: AnyRecord[] = [];
   const context: Context = {
     repo: { owner: "acme", repo: "project" },
@@ -196,7 +197,9 @@ test("review commands dispatch the review workflow", async () => {
   };
   const github = {
     rest: {
+      pulls: { get: async () => ({ data: pullRequest() }) },
       actions: {
+        listWorkflowRuns: async () => ({ data: { workflow_runs: [] } }),
         createWorkflowDispatch: async (payload: AnyRecord) =>
           dispatches.push(payload),
       },
@@ -204,19 +207,69 @@ test("review commands dispatch the review workflow", async () => {
     },
   } as unknown as GitHub;
 
-  await command.dispatchReview({ github, context, core: createCore() });
+  await command.handleCommand({ github, context, core: createCore() });
   context.payload.comment!.body = "  @Review \n";
-  await command.dispatchReview({ github, context, core: createCore() });
+  await command.handleCommand({ github, context, core: createCore() });
   // Mentions inside prose are not commands.
   context.payload.comment!.body = "please do not run @review on this PR";
-  await command.dispatchReview({ github, context, core: createCore() });
+  await command.handleCommand({ github, context, core: createCore() });
 
   assert.equal(dispatches.length, 2);
   assert.deepEqual(dispatches[0].inputs, { pr_number: "42" });
 });
 
-test("reply validation rejects untrusted authors and uses the live PR head", async () => {
-  // The event payload carries a stale head; the API returns the current one.
+test("a requested review re-runs the head's last review, leaves a running one, and dispatches otherwise", async () => {
+  const calls: string[] = [];
+  let run: AnyRecord | undefined;
+  // Set when GitHub refuses the re-run: the run's status when fetched again.
+  let refusedStatus: string | undefined;
+  const github = {
+    rest: {
+      pulls: { get: async () => ({ data: pullRequest() }) },
+      actions: {
+        listWorkflowRuns: async (query: AnyRecord) => {
+          assert.equal(query.event, "pull_request");
+          assert.equal(query.branch, "feature");
+          assert.equal(query.head_sha, "head-sha");
+          return { data: { workflow_runs: run ? [run] : [] } };
+        },
+        reRunWorkflow: async ({ run_id }: AnyRecord) => {
+          if (refusedStatus) throw new Error("Unable to re-run this workflow run");
+          calls.push(`rerun ${run_id}`);
+        },
+        getWorkflowRun: async () => ({ data: { ...run, status: refusedStatus } }),
+        createWorkflowDispatch: async ({ ref }: AnyRecord) => calls.push(`dispatch ${ref}`),
+      },
+    },
+  } as unknown as GitHub;
+  const context: Context = {
+    repo: { owner: "acme", repo: "project" },
+    payload: { repository: { default_branch: "main" } },
+  };
+  const start = (latest?: AnyRecord) => {
+    run = latest;
+    return startReview({ github, context, core: createCore() }, 42);
+  };
+
+  await start({ id: 1, status: "completed", conclusion: "failure", run_attempt: 1 });
+  await start({ id: 2, status: "in_progress", conclusion: null, run_attempt: 1 });
+  await start();
+  await start({ id: 3, status: "completed", conclusion: "skipped", run_attempt: 1 });
+  await start({ id: 4, status: "completed", conclusion: "failure", run_attempt: 50 });
+  // Refused because a concurrent request re-ran it first: leave that one going.
+  refusedStatus = "queued";
+  await start({ id: 5, status: "completed", conclusion: "success", run_attempt: 1 });
+  refusedStatus = "completed";
+  await start({ id: 6, status: "completed", conclusion: "success", run_attempt: 1 });
+
+  // Running reviews are left alone; no run, a skipped one, one at the re-run
+  // limit, or a refused re-run that is still finished each dispatch.
+  assert.deepEqual(calls, ["rerun 1", "dispatch main", "dispatch main", "dispatch main", "dispatch main"]);
+});
+
+test("replies reject untrusted authors, and replies and reviews read the live PR head", async () => {
+  // The event payload carries a stale head, as a re-run replays it; the API
+  // returns the current one.
   const current = { ...pullRequest(), head: { ...pullRequest().head, sha: "newer-sha" } };
   const github = {
     rest: { pulls: { get: async () => ({ data: current }) } },
@@ -244,6 +297,10 @@ test("reply validation rejects untrusted authors and uses the live PR head", asy
     await reply.validate({ github, context, core: trusted });
     assert.equal(trusted.outputs.skip, "false");
     assert.equal(trusted.outputs.head_sha, "newer-sha");
+
+    const reviewed = createCore();
+    await review.resolve({ github, context, core: reviewed });
+    assert.equal(reviewed.outputs.head_sha, "newer-sha");
 
     current.state = "closed";
     const closed = createCore();
@@ -396,7 +453,7 @@ test("status updates only the current GitHub App comment", async () => {
         createComment: async () =>
           assert.fail("should update the existing app comment"),
       },
-      pulls: { listReviews },
+      pulls: { listReviews, get: async () => ({ data: { ...pullRequest(), body: "Live description" } }) },
       repos: {
         compareCommits: async (payload: AnyRecord) => {
           compares.push(payload);
@@ -573,6 +630,8 @@ test("status updates only the current GitHub App comment", async () => {
       review.prepare({ github, context }),
     );
     assert.match(read("pr-context.md"), /reply on page two/);
+    // The live PR, not the payload a re-run replays.
+    assert.match(read("pr-context.md"), /Live description/);
     const verifyPrompt = read("review-prompt.md");
     assert.match(verifyPrompt, /pull request for acme\/project/);
     assert.doesNotMatch(verifyPrompt, /\{\{repository\}\}/);
@@ -1234,13 +1293,13 @@ test("a waiver closes every open thread under the same title and records itself"
   assert.deepEqual(dispatches, []);
 });
 
-test("reply reruns still resolve and dispatch when the reply was already posted", async () => {
+test("a retried reply run still resolves and starts the final review when the reply was already posted", async () => {
   const replies: AnyRecord[] = [];
   const resolved: string[] = [];
   const dispatches: AnyRecord[] = [];
   // Stateful mock: a concurrent reply run resolves thread-2 the moment this
   // run resolves thread-1. The final-review decision must come from a fetch
-  // taken after our own resolve, or neither run would dispatch.
+  // taken after our own resolve, or neither run would start the final review.
   const state = new Map([
     ["thread-1", { rootId: 7, isResolved: false }],
     ["thread-2", { rootId: 9, isResolved: false }],
@@ -1250,8 +1309,10 @@ test("reply reruns still resolve and dispatch when the reply was already posted"
       pulls: {
         createReplyForReviewComment: async (payload: AnyRecord) =>
           replies.push(payload),
+        get: async () => ({ data: pullRequest() }),
       },
       actions: {
+        listWorkflowRuns: async () => ({ data: { workflow_runs: [] } }),
         createWorkflowDispatch: async (payload: AnyRecord) =>
           dispatches.push(payload),
       },
@@ -1395,7 +1456,7 @@ test("prepare starts from a clean .codex directory", async () => {
   const github = {
     rest: {
       issues: { listComments: () => {}, createComment: async () => {} },
-      pulls: { listReviews: () => {} },
+      pulls: { listReviews: () => {}, get: async () => ({ data: pullRequest() }) },
     },
     paginate: async () => [],
     graphql: async () => ({
@@ -1497,7 +1558,7 @@ test("review rules reach the rules finder and the verifier only", async () => {
   const github = {
     rest: {
       issues: { listComments: () => {}, createComment: async () => {} },
-      pulls: { listReviews: () => {} },
+      pulls: { listReviews: () => {}, get: async () => ({ data: pullRequest() }) },
     },
     paginate: async () => [],
     graphql: async () => ({

@@ -90,12 +90,13 @@ function findingTitle(value) {
 }
 async function resolve({ github, context, core, }) {
     const { owner, repo } = context.repo;
-    const pullRequest = context.payload.pull_request ??
-        (await github.rest.pulls.get({
-            owner,
-            repo,
-            pull_number: Number(process.env.M6D_PR_NUMBER),
-        })).data;
+    // Always the live PR: a re-run replays its original event, whose payload
+    // may predate a newer push, a retargeted base, or a switch to draft.
+    const pullRequest = (await github.rest.pulls.get({
+        owner,
+        repo,
+        pull_number: Number(process.env.M6D_PR_NUMBER),
+    })).data;
     const problems = (0, helpers_js_1.pullRequestProblems)(pullRequest, `${owner}/${repo}`, process.env.M6D_BASE_BRANCH);
     if (problems.length > 0) {
         core.setFailed(`Refusing to review PR #${pullRequest.number}: ${problems.join("; ")}.`);
@@ -356,12 +357,13 @@ async function upsertStatus(github, owner, repo, pullNumber, body) {
 }
 async function prepare({ github, context, }) {
     const { owner, repo } = context.repo;
-    const pullRequest = context.payload.pull_request ??
-        (await github.rest.pulls.get({
-            owner,
-            repo,
-            pull_number: Number(process.env.M6D_PR_NUMBER),
-        })).data;
+    // The live PR, as in `resolve`, so a re-run's prompt carries the current
+    // title, description, and author.
+    const pullRequest = (await github.rest.pulls.get({
+        owner,
+        repo,
+        pull_number: Number(process.env.M6D_PR_NUMBER),
+    })).data;
     const pullNumber = pullRequest.number;
     await upsertStatus(github, owner, repo, pullNumber, [
         MARKER,
@@ -391,8 +393,9 @@ async function prepare({ github, context, }) {
         "",
         `PR: #${pullNumber} ${pullRequest.title}`,
         `Author: ${pullRequest.user.login}`,
-        `Base: ${pullRequest.base.ref} (${pullRequest.base.sha})`,
-        `Head: ${pullRequest.head.ref} (${pullRequest.head.sha})`,
+        // The commits `resolve` picked, which the diff and checkout use.
+        `Base: ${process.env.M6D_BASE_REF} (${process.env.M6D_BASE_SHA})`,
+        `Head: ${pullRequest.head.ref} (${process.env.M6D_HEAD_SHA})`,
         `Review bot: ${process.env.M6D_APP_SLUG}[bot]`,
         "",
         "## PR Description",

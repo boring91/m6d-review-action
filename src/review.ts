@@ -154,15 +154,15 @@ export async function resolve({
   core,
 }: HandlerOptions): Promise<void> {
   const { owner, repo } = context.repo;
-  const pullRequest =
-    context.payload.pull_request ??
-    (
-      await github.rest.pulls.get({
-        owner,
-        repo,
-        pull_number: Number(process.env.M6D_PR_NUMBER),
-      })
-    ).data as PullRequest;
+  // Always the live PR: a re-run replays its original event, whose payload
+  // may predate a newer push, a retargeted base, or a switch to draft.
+  const pullRequest = (
+    await github.rest.pulls.get({
+      owner,
+      repo,
+      pull_number: Number(process.env.M6D_PR_NUMBER),
+    })
+  ).data as PullRequest;
   const problems = pullRequestProblems(
     pullRequest,
     `${owner}/${repo}`,
@@ -477,15 +477,15 @@ export async function prepare({
   context,
 }: Pick<HandlerOptions, "github" | "context">): Promise<void> {
   const { owner, repo } = context.repo;
-  const pullRequest =
-    context.payload.pull_request ??
-    (
-      await github.rest.pulls.get({
-        owner,
-        repo,
-        pull_number: Number(process.env.M6D_PR_NUMBER),
-      })
-    ).data as PullRequest;
+  // The live PR, as in `resolve`, so a re-run's prompt carries the current
+  // title, description, and author.
+  const pullRequest = (
+    await github.rest.pulls.get({
+      owner,
+      repo,
+      pull_number: Number(process.env.M6D_PR_NUMBER),
+    })
+  ).data as PullRequest;
   const pullNumber = pullRequest.number;
 
   await upsertStatus(
@@ -523,8 +523,9 @@ export async function prepare({
     "",
     `PR: #${pullNumber} ${pullRequest.title}`,
     `Author: ${pullRequest.user.login}`,
-    `Base: ${pullRequest.base.ref} (${pullRequest.base.sha})`,
-    `Head: ${pullRequest.head.ref} (${pullRequest.head.sha})`,
+    // The commits `resolve` picked, which the diff and checkout use.
+    `Base: ${process.env.M6D_BASE_REF} (${process.env.M6D_BASE_SHA})`,
+    `Head: ${pullRequest.head.ref} (${process.env.M6D_HEAD_SHA})`,
     `Review bot: ${process.env.M6D_APP_SLUG}[bot]`,
     "",
     "## PR Description",

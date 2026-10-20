@@ -38,6 +38,14 @@ export type PullRequest = {
   stack?: { base: { ref: string; sha: string } } | null;
 };
 
+// The fields `startReview` reads from a workflow run.
+export type WorkflowRun = {
+  id: number;
+  status: string;
+  conclusion: string | null;
+  run_attempt: number;
+};
+
 export type Comment = {
   id: number;
   body?: string | null;
