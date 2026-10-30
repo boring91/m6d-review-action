@@ -211,10 +211,14 @@ if (require.main === module) {
 export async function notifyRateLimit({ github, context, core }: HandlerOptions): Promise<void> {
   const reasons = process.env.M6D_LIMITED || "";
   if (!reasons) return;
-  const configured = (process.env.M6D_NOTIFY || "")
-    .split(",")
-    .map((login) => login.trim().replace(/^@/, ""))
-    .filter(Boolean);
+  const configured = [
+    ...new Set(
+      (process.env.M6D_NOTIFY || "")
+        .split(",")
+        .map((login) => login.trim().replace(/^@/, ""))
+        .filter(Boolean),
+    ),
+  ];
   const rulesSha = process.env.M6D_RULES_SHA || "";
   const logins = configured.length || !rulesSha ? configured : codeOwners(rulesSha);
   const headSha = (process.env.M6D_HEAD_SHA || "").slice(0, 7);

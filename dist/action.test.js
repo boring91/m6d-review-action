@@ -1328,7 +1328,7 @@ function gitRepository(directory, commits = { "base-sha": {}, "head-sha": {} }) 
     await inTemporaryDirectory((directory) => {
         gitRepository(directory, {
             "base-sha": {
-                ".github/CODEOWNERS": "# Maintainers\n*  @Lead  @acme/core  ops@acme.dev\n/docs/  @writer  # @commented\n",
+                ".github/CODEOWNERS": "# Maintainers\n*  @Lead  @acme/core  ops@acme.dev\n/docs/  @writer  # @commented\n/src/  @lead @Writer\n",
                 CODEOWNERS: "* @shadowed\n",
             },
         });
@@ -1658,7 +1658,7 @@ async function runReplyStep(directory, codex, prompt = "Review this change.") {
         rest: { issues: { createComment: async (parameters) => comments.push(parameters) } },
     };
     const context = { repo: { owner: "acme", repo: "project" }, payload: {} };
-    process.env.M6D_NOTIFY = "owner, @second";
+    process.env.M6D_NOTIFY = "owner, @second, @owner";
     process.env.M6D_PR_NUMBER = "7";
     process.env.M6D_HEAD_SHA = "abcdef1234567";
     try {

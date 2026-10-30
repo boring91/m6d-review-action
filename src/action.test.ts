@@ -1500,7 +1500,7 @@ test("code owners are the logins in the first CODEOWNERS file GitHub would read"
   await inTemporaryDirectory((directory) => {
     gitRepository(directory, {
       "base-sha": {
-        ".github/CODEOWNERS": "# Maintainers\n*  @Lead  @acme/core  ops@acme.dev\n/docs/  @writer  # @commented\n",
+        ".github/CODEOWNERS": "# Maintainers\n*  @Lead  @acme/core  ops@acme.dev\n/docs/  @writer  # @commented\n/src/  @lead @Writer\n",
         CODEOWNERS: "* @shadowed\n",
       },
     });
@@ -1898,7 +1898,7 @@ test("a step that stayed rate limited posts one comment that mentions the owners
     rest: { issues: { createComment: async (parameters: AnyRecord) => comments.push(parameters) } },
   } as unknown as GitHub;
   const context = { repo: { owner: "acme", repo: "project" }, payload: {} } as Context;
-  process.env.M6D_NOTIFY = "owner, @second";
+  process.env.M6D_NOTIFY = "owner, @second, @owner";
   process.env.M6D_PR_NUMBER = "7";
   process.env.M6D_HEAD_SHA = "abcdef1234567";
   try {

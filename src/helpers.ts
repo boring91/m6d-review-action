@@ -75,17 +75,18 @@ function filesAt(base: string, paths: Iterable<string>): string[] {
 // Where GitHub looks for CODEOWNERS, in the order it picks the first found.
 const CODEOWNERS_FILES = [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"];
 
-// Lowercased logins named in the CODEOWNERS file, read at `base` like the
-// review rules so a pull request cannot list its own author. Team and email
-// owners are skipped, and an owner of any path counts for every path.
+// Lowercased logins named in the CODEOWNERS file, each once, read at `base`
+// like the review rules so a pull request cannot list its own author. Team
+// and email owners are skipped, and an owner of any path counts for every path.
 export function codeOwners(base: string): string[] {
   const found = filesAt(base, CODEOWNERS_FILES);
   const file = CODEOWNERS_FILES.find((candidate) => found.includes(candidate));
   if (!file) return [];
-  return git("show", `${base}:${file}`)
+  const logins = git("show", `${base}:${file}`)
     .split("\n")
     .flatMap((line) => line.replace(/#.*/, "").trim().split(/\s+/).slice(1))
     .flatMap((owner) => owner.match(/^@([\w-]+)$/)?.[1].toLowerCase() ?? []);
+  return [...new Set(logins)];
 }
 
 // Size caps, in characters, on the REVIEW.md text pasted into a prompt.
