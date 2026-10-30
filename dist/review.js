@@ -538,7 +538,7 @@ async function prepare({ github, context, }) {
         .split("\0")
         .filter(Boolean));
     // The checkout is untrusted PR content. Start from an empty .codex so a PR
-    // cannot plant extra finder prompts, fake candidates, or symlinked logs.
+    // cannot plant extra finder prompts or fake candidates.
     fs.rmSync(".codex", { recursive: true, force: true });
     fs.mkdirSync(".codex/finders", { recursive: true });
     fs.writeFileSync(".codex/pr-context.md", `${contextLines.join("\n")}\n`, "utf8");

@@ -149,13 +149,15 @@ The full-review workflow must remain named `review.yml` because command and repl
 ## Requirements
 
 - A self-hosted Linux runner with Codex CLI, Git, Bash, and `base64` available.
-- Codex CLI must already be authenticated on the runner.
+- Codex CLI must already be authenticated on the runner. Run at least two runners, so one outage does not leave the required check pending.
 - A GitHub App installed on the consumer repository with Contents, Issues, Pull requests, and Actions write permissions.
 - Repository secrets named `REVIEW_APP_ID` and `REVIEW_APP_PRIVATE_KEY`, or equivalent values passed to the action inputs.
 
 Contents write permission is required because GitHub gates review-thread resolution on repository write access, even when the token already has Pull requests write permission.
 
 The action rejects drafts, forked pull requests, closed pull requests, and pull requests that do not land on `base-branch`. A layer of a [GitHub stack](https://docs.github.com/en/pull-requests/get-started/about-stacked-prs) targets the layer below it but lands where its stack does, so it is accepted and reviewed against the layer below, so each layer's review covers only its own diff. The workflow conditions above read the stack's base the same way. Only owners, members, and collaborators can trigger `@review` commands or review-reply evaluations. A command comment must consist of exactly `@review`; mentions inside longer text are ignored. Finders, thread retries, and replies use `gpt-6.1-sol` at `high` reasoning effort; the verifier runs at `medium`, which kept every `HIGH` and `MEDIUM` finding in testing at about half the wall time. Codex runs with `danger-full-access` and an approval policy of `never`.
+
+Every model call goes through `src/model.ts`, run from shell steps so that no process holding a GitHub token is alive while Codex reads the pull request. When Codex reports that `gpt-6.1-sol` is rate limited, past its usage limit or out of capacity, the call waits five minutes and tries again, three tries in all. Each call waits at most ten minutes, but a limited try starts its work over, so leave room in the job's timeout. Any other error fails the check at once. A call still limited after three tries fails the check, and the run posts one pull-request comment quoting the error and mentioning the `notify` input's logins, or by default the users in `CODEOWNERS`, so a blocked review never waits unnoticed.
 
 Use `@main` while developing. Pin production consumers to `@v1` or an exact commit SHA after verification.
 
