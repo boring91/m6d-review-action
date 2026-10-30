@@ -27,6 +27,10 @@ inputs:
     description: "Comma-separated author associations allowed to close a finding with `@review waive <reason>`, on top of the users listed in CODEOWNERS. Use MEMBER for organisation-owned repositories."
     required: false
     default: OWNER
+  notify:
+    description: "Comma-separated GitHub logins a pull-request comment mentions when gpt-6.1-sol stays rate limited through three tries and the run fails. Defaults to the users listed in CODEOWNERS."
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -53,6 +57,15 @@ runs:
             exit 1
             ;;
         esac
+
+    # The model steps run the action's code with the Node the runner bundles,
+    # so runners need none of their own.
+    - name: Find the runner's Node
+      id: node
+      if: inputs.mode == 'review' || inputs.mode == 'reply'
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+      with:
+        script: core.setOutput("path", process.execPath)
 
     - name: Create review app token
       id: review-app-token
@@ -118,36 +131,13 @@ runs:
           const review = require(`${process.env.M6D_ACTION_PATH}/dist/review.js`);
           await review.prepare({ github, context, core });
 
+    # Codex runs from shell steps, never github-script, so no process holding
+    # a GitHub token is alive while it reads untrusted pull-request text.
     - name: Run Codex review
       id: codex-review
       if: inputs.mode == 'review'
       shell: bash
-      run: |
-        set -euo pipefail
-        codex_review() {
-          codex exec --model gpt-6.1-sol -c "model_reasoning_effort=\"$1\"" --ephemeral -c 'approval_policy="never"' -c 'sandbox_mode="danger-full-access"' --output-schema "$2" -o "$3" - < "$4"
-          test -s "$3"
-        }
-        # Finder prompts were written by prepare: one for standard, four for
-        # thorough plus a rules finder when a REVIEW.md covers the diff. They
-        # run in parallel; any finder failure fails the review.
-        # Finders run at high reasoning because recall drops sharply below it.
-        # The verifier runs at medium: on the same candidates it keeps every
-        # HIGH and MEDIUM finding at roughly half the wall time.
-        mkdir -p .codex/candidates .codex/logs
-        pids=()
-        for prompt in .codex/finders/*.md; do
-          name="$(basename "$prompt" .md)"
-          codex_review high .codex/candidates-schema.json ".codex/candidates/$name.json" "$prompt" > ".codex/logs/$name.log" 2>&1 &
-          pids+=($!)
-        done
-        status=0
-        for pid in "${pids[@]}"; do wait "$pid" || status=1; done
-        cat .codex/logs/*.log
-        test "$status" -eq 0
-        # The verifier confirms or drops every candidate and writes the final review.
-        codex_review medium .codex/review-schema.json .codex/review.json .codex/review-prompt.md
-
+      run: '"${{ steps.node.outputs.path }}" "${{ github.action_path }}/dist/model.js" review'
     - name: Check thread decisions
       id: check-threads
       if: inputs.mode == 'review' && steps.codex-review.outcome == 'success'
@@ -163,13 +153,10 @@ runs:
           await review.checkThreads({ github, context, core });
 
     - name: Retry skipped thread decisions
+      id: retry-threads
       if: inputs.mode == 'review' && steps.check-threads.outputs.retry == 'true'
       shell: bash
-      run: |
-        set -euo pipefail
-        codex exec --model gpt-6.1-sol -c 'model_reasoning_effort="high"' --ephemeral -c 'approval_policy="never"' -c 'sandbox_mode="danger-full-access"' --output-schema .codex/threads-schema.json -o .codex/threads.json - < .codex/threads-prompt.md
-        test -s .codex/threads.json
-
+      run: '"${{ steps.node.outputs.path }}" "${{ github.action_path }}/dist/model.js" threads'
     - name: Submit pull-request review
       id: submit-review
       if: inputs.mode == 'review' && steps.codex-review.outcome == 'success'
@@ -300,11 +287,7 @@ runs:
       id: codex-reply
       if: inputs.mode == 'reply' && steps.prepare-reply.outputs.skip != 'true' && steps.prepare-reply.outputs.waiver == ''
       shell: bash
-      run: |
-        set -euo pipefail
-        codex exec --model gpt-6.1-sol -c 'model_reasoning_effort="high"' --ephemeral -c 'approval_policy="never"' -c 'sandbox_mode="danger-full-access"' --output-schema .codex/reply-schema.json -o .codex/reply.json - < .codex/reply-prompt.md
-        test -s .codex/reply.json
-
+      run: '"${{ steps.node.outputs.path }}" "${{ github.action_path }}/dist/model.js" reply'
     - name: Post review reply
       if: inputs.mode == 'reply' && steps.prepare-reply.outputs.skip != 'true' && (steps.codex-reply.outcome == 'success' || steps.prepare-reply.outputs.waiver != '')
       uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
@@ -320,6 +303,22 @@ runs:
         script: |
           const reply = require(`${process.env.M6D_ACTION_PATH}/dist/reply.js`);
           await reply.post({ github, context, core });
+
+    - name: Report a rate limit
+      if: failure() && (steps.codex-review.outputs.limited || steps.retry-threads.outputs.limited || steps.codex-reply.outputs.limited)
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+      env:
+        M6D_ACTION_PATH: ${{ github.action_path }}
+        M6D_LIMITED: ${{ steps.codex-review.outputs.limited || steps.retry-threads.outputs.limited || steps.codex-reply.outputs.limited }}
+        M6D_NOTIFY: ${{ inputs.notify }}
+        M6D_PR_NUMBER: ${{ steps.pr.outputs.number || github.event.pull_request.number }}
+        M6D_HEAD_SHA: ${{ steps.pr.outputs.head_sha || steps.reply-context.outputs.head_sha }}
+        M6D_RULES_SHA: ${{ steps.pr.outputs.rules_sha || steps.reply-context.outputs.rules_sha }}
+      with:
+        github-token: ${{ steps.review-app-token.outputs.token || steps.reply-app-token.outputs.token }}
+        script: |
+          const { notifyRateLimit } = require(`${process.env.M6D_ACTION_PATH}/dist/model.js`);
+          await notifyRateLimit({ github, context, core });
 
 branding:
   icon: eye

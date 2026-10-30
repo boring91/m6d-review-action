@@ -17,6 +17,7 @@ import {
   truncate,
 } from "./helpers.js";
 import * as command from "./command.js";
+import { notifyRateLimit, runStep } from "./model.js";
 import * as reply from "./reply.js";
 import * as review from "./review.js";
 import type { Context, Core, GitHub, PullRequest } from "./types.js";
@@ -160,15 +161,16 @@ test("packaged prompts load independently of the working directory", async () =>
   });
 });
 
-test("review action runs finders at high reasoning and the verifier at medium", () => {
+test("Codex runs only from shell steps, and a waiver skips it but still posts", () => {
   const action = fs.readFileSync(path.join(__dirname, "../action.yml"), "utf8");
-  assert.match(action, /codex_review high \.codex\/candidates-schema\.json/);
-  assert.match(action, /codex_review medium \.codex\/review-schema\.json/);
-  // Thread retry and reply stay pinned at high.
+  // A github-script step holds the app token, which Codex could read from /proc.
   assert.equal(
-    action.match(/codex exec --model gpt-6\.1-sol -c 'model_reasoning_effort="high"' --ephemeral/g)?.length,
-    2,
+    action.match(/shell: bash\n\s+run: '"\$\{\{ steps\.node\.outputs\.path \}\}" "\$\{\{ github\.action_path \}\}\/dist\/model\.js" (?:review|threads|reply)'\n/g)?.length,
+    3,
   );
+  assert.equal(action.match(/dist\/model\.js`\);\n\s+await notifyRateLimit/g)?.length, 1);
+  assert.equal(action.match(/dist\/model\.js/g)?.length, 4);
+  assert.doesNotMatch(action, /codex exec/);
   assert.doesNotMatch(action, /agents\./);
   // A waiver skips Codex and still reaches the post step.
   assert.match(action, /id: codex-reply\n\s+if: .*steps\.prepare-reply\.outputs\.waiver == ''/);
@@ -1498,7 +1500,7 @@ test("code owners are the logins in the first CODEOWNERS file GitHub would read"
   await inTemporaryDirectory((directory) => {
     gitRepository(directory, {
       "base-sha": {
-        ".github/CODEOWNERS": "# Maintainers\n*  @Lead  @acme/core  ops@acme.dev\n/docs/  @writer  # @commented\n",
+        ".github/CODEOWNERS": "# Maintainers\n*  @Lead  @acme/core  ops@acme.dev\n/docs/  @writer  # @commented\n/src/  @lead @Writer\n",
         CODEOWNERS: "* @shadowed\n",
       },
     });
@@ -1744,4 +1746,173 @@ test("re-reviews defer findings on unchanged code and on dropped precedent", () 
     ) >= 0.6,
   );
   assert.ok(review.similarTitles("Reuse the existing URL aliases", "Pin the MinIO image digest") < 0.3);
+});
+
+// Puts a fake `codex` on PATH for `run`. Like Codex, it echoes the prompt,
+// then takes the next entry of `codex`: an empty one, or none left, writes
+// output and succeeds; any other is printed as an `ERROR:` line and fails.
+// Each call's arguments are kept, one line per call.
+async function withFakeCodex(
+  directory: string,
+  codex: string[],
+  run: (calls: () => string[]) => Promise<void>,
+): Promise<void> {
+  const bin = path.join(directory, "bin");
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(directory, "codex-queue"), codex.length ? `${codex.join("\n")}\n` : "");
+  fs.writeFileSync(
+    path.join(bin, "codex"),
+    `#!/usr/bin/env bash
+cat
+queue="${directory}/codex-queue"
+message=""
+if [ -s "$queue" ]; then
+  message="$(head -n 1 "$queue")"
+  tail -n +2 "$queue" > "$queue.next" && mv "$queue.next" "$queue"
+fi
+echo "$*" >> "${directory}/codex-calls"
+if [ -z "$message" ]; then
+  while [ $# -gt 0 ]; do [ "$1" = -o ] && out="$2"; shift; done
+  echo '{"verdict":"codex"}' > "$out"
+  exit 0
+fi
+echo "ERROR: $message" >&2
+exit 1
+`,
+    { mode: 0o755 },
+  );
+  const previous = { PATH: process.env.PATH, GITHUB_OUTPUT: process.env.GITHUB_OUTPUT };
+  process.env.PATH = `${bin}:${previous.PATH}`;
+  process.env.GITHUB_OUTPUT = path.join(directory, "github-output");
+  try {
+    await run(() => {
+      const file = path.join(directory, "codex-calls");
+      return fs.existsSync(file) ? fs.readFileSync(file, "utf8").split("\n").filter(Boolean) : [];
+    });
+  } finally {
+    process.env.PATH = previous.PATH;
+    if (previous.GITHUB_OUTPUT === undefined) delete process.env.GITHUB_OUTPUT;
+    else process.env.GITHUB_OUTPUT = previous.GITHUB_OUTPUT;
+  }
+}
+
+// Runs the reply step with no cool-off, answering its exit code, Codex's
+// output, the step's outputs and how many times Codex ran.
+async function runReplyStep(directory: string, codex: string[], prompt = "Review this change.") {
+  fs.mkdirSync(".codex", { recursive: true });
+  fs.writeFileSync(".codex/reply-schema.json", "{}");
+  fs.writeFileSync(".codex/reply-prompt.md", `${prompt}\n`);
+  let code = -1;
+  let codexCalls = 0;
+  await withFakeCodex(directory, codex, async (calls) => {
+    code = await runStep("reply", 0);
+    codexCalls = calls().length;
+  });
+  const read = (file: string) => (fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim() : "");
+  return { code, output: read(".codex/reply.json"), outputs: read(path.join(directory, "github-output")), codexCalls };
+}
+
+test("a model call that succeeds takes one try", async () => {
+  await inTemporaryDirectory(async (directory) => {
+    assert.deepEqual(await runReplyStep(directory, [""]), {
+      code: 0,
+      output: '{"verdict":"codex"}',
+      outputs: "",
+      codexCalls: 1,
+    });
+  });
+});
+
+test("a rate limit is tried again after the cool-off", async () => {
+  await inTemporaryDirectory(async (directory) => {
+    assert.deepEqual(await runReplyStep(directory, ["unexpected status 429 Too Many Requests", "", ""]), {
+      code: 0,
+      output: '{"verdict":"codex"}',
+      outputs: "",
+      codexCalls: 2,
+    });
+  });
+});
+
+test("a call still limited after three tries fails the step and names why", async () => {
+  for (const error of [
+    "unexpected status 429 Too Many Requests",
+    "You've hit your usage limit. Try again at 3:12 PM.",
+    "The model is at capacity, try again later",
+  ]) {
+    await inTemporaryDirectory(async (directory) => {
+      assert.deepEqual(await runReplyStep(directory, [error, error, error, ""]), {
+        code: 1,
+        output: "",
+        outputs: `limited=${error}`,
+        codexCalls: 3,
+      });
+    });
+  }
+});
+
+test("only an error that names a limit is tried again", async () => {
+  for (const [prompt, error] of [
+    ["Fix the capacity check so 1429 rate limit hits are counted.", "unexpected status 401 Unauthorized"],
+    ["Review this change.", "request 14290 failed"],
+  ]) {
+    await inTemporaryDirectory(async (directory) => {
+      assert.deepEqual(await runReplyStep(directory, [error, ""], prompt), {
+        code: 1,
+        output: "",
+        outputs: "",
+        codexCalls: 1,
+      });
+    });
+  }
+});
+
+test("each model step runs Codex at its reasoning effort", async () => {
+  await inTemporaryDirectory(async (directory) => {
+    await withFakeCodex(directory, [], async (calls) => {
+      // Without finder prompts the review fails before calling Codex.
+      assert.equal(await runStep("review", 0), 1);
+      assert.deepEqual(calls(), []);
+
+      fs.mkdirSync(".codex/finders", { recursive: true });
+      for (const name of ["correctness", "security"]) fs.writeFileSync(`.codex/finders/${name}.md`, `Find ${name} bugs.\n`);
+      for (const file of ["review-prompt.md", "threads-prompt.md", "reply-prompt.md"]) fs.writeFileSync(`.codex/${file}`, "Decide.\n");
+      for (const step of ["review", "threads", "reply"]) assert.equal(await runStep(step, 0), 0);
+      const efforts = calls().map((call) => `${call.match(/model_reasoning_effort="(\w+)"/)?.[1]} ${call.match(/-o (\S+)/)?.[1]}`);
+      assert.deepEqual(efforts.slice(0, 2).sort(), [
+        "high .codex/candidates/correctness.json",
+        "high .codex/candidates/security.json",
+      ]);
+      assert.deepEqual(efforts.slice(2), [
+        "medium .codex/review.json",
+        "high .codex/threads.json",
+        "high .codex/reply.json",
+      ]);
+    });
+  });
+});
+
+test("a step that stayed rate limited posts one comment that mentions the owners", async () => {
+  const comments: AnyRecord[] = [];
+  const github = {
+    rest: { issues: { createComment: async (parameters: AnyRecord) => comments.push(parameters) } },
+  } as unknown as GitHub;
+  const context = { repo: { owner: "acme", repo: "project" }, payload: {} } as Context;
+  process.env.M6D_NOTIFY = "owner, @second, @owner";
+  process.env.M6D_PR_NUMBER = "7";
+  process.env.M6D_HEAD_SHA = "abcdef1234567";
+  try {
+    await notifyRateLimit({ github, context, core: createCore() });
+    assert.equal(comments.length, 0);
+    process.env.M6D_LIMITED = "unexpected status 429";
+    await notifyRateLimit({ github, context, core: createCore() });
+  } finally {
+    for (const name of ["M6D_NOTIFY", "M6D_PR_NUMBER", "M6D_HEAD_SHA", "M6D_LIMITED"]) delete process.env[name];
+  }
+  assert.equal(comments.length, 1);
+  assert.equal(comments[0].issue_number, 7);
+  assert.equal(
+    comments[0].body,
+    "@owner @second This run on abcdef1 failed: gpt-6.1-sol was still rate limited (unexpected status 429) after 3 tries. Re-run the job once the limit resets.",
+  );
 });
